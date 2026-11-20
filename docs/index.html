@@ -73,7 +73,7 @@
     </li>
     <li>
       <h3>A small U-Net</h3>
-      <p>U-Net with a MobileNetV2 encoder, 4,133,819 parameters, trained with BCE plus Dice loss on MethaneSET (3,605 labelled Sentinel-2 chips, emitter-grouped splits).</p>
+      <p>U-Net with a MobileNetV2 encoder, 4,133,819 parameters, trained with BCE plus Dice loss on MethaneSET (3,605 labelled Sentinel-2 chips, official temporal split with 2024 as the test year).</p>
     </li>
     <li>
       <h3>Teach it what “nothing” looks like</h3>
@@ -89,7 +89,7 @@
 <section id="results" class="block reveal">
   <p class="eyebrow">Results</p>
   <h2>Measured, not promised.</h2>
-  <p class="sub">Held-out test split (1,050 chips), 20&nbsp;m grid, threshold 0.5. Single runs, no confidence intervals: treat differences of about 0.01 as noise.</p>
+  <p class="sub">2024 test split (1,050 chips, 76&nbsp;% from sites also seen in training), 20&nbsp;m grid, threshold 0.5. Single runs, no confidence intervals: treat differences of about 0.01 as noise.</p>
 
   <div class="charts">
     <figure class="chart" aria-labelledby="c1">
@@ -134,6 +134,24 @@
     <p><strong>The takeaway.</strong> Full resolution and soups nudged IoU up by about a point. Training on plume-free pairs did far more for the number that matters on orbit: <code>fr_neg</code> flags 55&nbsp;% of plume-free pairs against 90&nbsp;% for <code>fr_base</code>, at the cost of lower detection (0.839 vs 0.934).</p>
   </div>
 
+
+  <h3 class="minor">New sites are harder.</h3>
+  <p class="fine">The official split is by year, not by site: 799 of the 1,050 test chips come from sites that also appear in training (same site name and emission point within 1&nbsp;km). The MethaneSET dataset card says the split is grouped by emitter, but its metadata does not match that, and our earlier wording repeated the mistake. Scores on the 251 chips from 92 sites never seen in training:</p>
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Seen versus unseen site results">
+  <table>
+    <thead>
+      <tr><th scope="col">Model (20&nbsp;m grid)</th><th scope="col">Test sites</th><th scope="col">Chips</th><th scope="col">IoU</th><th scope="col">F1</th><th scope="col">Detection</th><th scope="col">False alarm</th></tr>
+    </thead>
+    <tbody>
+      <tr><th scope="row">fr_neg (released)</th><td>Seen</td><td>799</td><td>0.543</td><td>0.704</td><td>0.872</td><td>0.579</td></tr>
+      <tr class="hl"><th scope="row">fr_neg (released)</th><td>Unseen</td><td>251</td><td>0.435</td><td>0.607</td><td>0.733</td><td>0.454</td></tr>
+      <tr><th scope="row">CPU greedy soup</th><td>Seen</td><td>799</td><td>0.526</td><td>0.689</td><td>0.926</td><td>0.835</td></tr>
+      <tr><th scope="row">CPU greedy soup</th><td>Unseen</td><td>251</td><td>0.447</td><td>0.618</td><td>0.813</td><td>0.793</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="fine" style="margin-bottom:56px">Expect new-site performance nearer the unseen rows. The lower unseen false-alarm rate reflects a different scene mix, not better generalisation. 251 chips is a small sample. Source: <code>test_seen_unseen.csv</code>.</p>
+
   <div class="speed">
     <div><span class="num">~31&nbsp;ms</span><span class="lbl">ONNX Runtime, x86 CPU, 1 thread</span></div>
     <div><span class="num">~11&nbsp;ms</span><span class="lbl">PyTorch FP16, Tesla T4</span></div>
@@ -156,6 +174,7 @@
   <h2>What this is not.</h2>
   <ul class="caveats">
     <li><strong>Not tested on a Jetson.</strong> The TensorRT build script is written but untested on SE-2 hardware.</li>
+    <li><strong>Most test sites were seen in training.</strong> The official test split is the year 2024, not a set of held-out sites, so the headline numbers are optimistic for new sites. On unseen sites <code>fr_neg</code> scores IoU 0.435 and detection 0.733.</li>
     <li><strong>Not affiliated with Spiral Blue.</strong> It is an independent demo, not endorsed or tested by them.</li>
     <li><strong>False alarms are an upper bound.</strong> They are measured on plume-free reference pairs from known super-emitter sites, which may hold real, unlabelled plumes. Chips are centred on known emitters; arbitrary scenes would see more false alarms.</li>
     <li><strong>INT8 may wash out the signal.</strong> The methane signal is about 1&nbsp;% of reflectance. Any INT8 engine must be validated against the ONNX model.</li>

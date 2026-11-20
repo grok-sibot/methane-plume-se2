@@ -39,7 +39,9 @@ endorsed by, or tested by Spiral Blue.** It has not been run on Jetson hardware 
 
 - 3,605 Sentinel-2 plume chips (200×200 at 10 m, 13 bands) from MARS-S2L / UNEP IMEO.
 - Each chip has a binary plume mask and the MARS reference scene (`bg0`).
-- Official emitter-grouped splits: 2,362 train, 193 validation, 1,050 test.
+- Official splits inherited from MARS-S2L: 2,362 train, 193 validation, 1,050 test. The split is **temporal** (train
+  2018–2020 and 2022–2023, val 2021, test 2024), **not grouped by site**: 76 % of test chips come from sites seen in
+  training. See "Seen vs unseen sites" below.
 - Chips were 2×2 mean-pooled to 20 m, the native resolution of the SWIR bands. A pixel counts as
   plume where at least 50 % of the 10 m label pixels are plume.
 - Plume pixels make up 3.3 % of all pixels.
@@ -100,6 +102,43 @@ How to read the table:
   It cuts false alarms from about 0.94 to 0.56. The cost is lower recall: chip detection falls
   from 0.92 to 0.81 on test.
 
+## Seen vs unseen sites (test split)
+
+The official MethaneSET `s2-finetune` split is inherited from MARS-S2L and is **temporal, not site-grouped**. Train covers
+2018–2020 and 2022–2023 (2,362 chips), validation is 2021 (193) and test is 2024 (1,050). **799 of the 1,050 test chips (76 %)
+come from sites that also appear in training.** The MethaneSET dataset card describes the split as "grouped by emitter", but the
+per-chip metadata (`site:location_name`, `emission:lat`/`emission:lon`) does not match that. Earlier versions of this card described
+the split as grouped by site or emitter. That was wrong.
+
+**Rule:** a test chip is *seen* if at least one training chip has the same `site:location_name` **and** an emission point within
+1 km (haversine). In this data every name match also has an identical emission point, and no other test chip has a training
+emission point within 1 km, so name-only and distance-only rules give the same 799 / 251 split. The 251 unseen chips come from 92
+sites, all oil and gas, led by Turkmenistan (62 chips), the USA (46) and Syria (37). Validation is also mostly seen sites: 192 of
+193 val chips share a site name with training.
+
+Released weights, test split, threshold 0.5 (measured; det/FA use ≥0.4 ha):
+
+| model | grid | test subset | chips | IoU | F1 | P | R | det | FA |
+|---|---|---|---|---|---|---|---|---|---|
+| fr_neg (10 m, released) | 10 m native | all | 1050 | 0.519 | 0.683 | 0.729 | 0.643 | 0.839 | 0.550 |
+| fr_neg (10 m, released) | 20 m-equivalent | all | 1050 | 0.521 | 0.685 | 0.745 | 0.634 | 0.839 | 0.550 |
+| fr_neg (10 m, released) | 10 m native | seen sites | 799 | 0.541 | 0.702 | 0.739 | 0.668 | 0.872 | 0.581 |
+| fr_neg (10 m, released) | 20 m-equivalent | seen sites | 799 | 0.543 | 0.704 | 0.755 | 0.659 | 0.872 | 0.579 |
+| fr_neg (10 m, released) | 10 m native | **unseen sites** | 251 | 0.434 | 0.605 | 0.683 | 0.543 | 0.733 | 0.450 |
+| fr_neg (10 m, released) | 20 m-equivalent | **unseen sites** | 251 | 0.435 | 0.607 | 0.699 | 0.536 | 0.733 | 0.454 |
+| CPU greedy soup (20 m, released) | 20 m native | all | 1050 | 0.509 | 0.675 | 0.710 | 0.643 | 0.899 | 0.825 |
+| CPU greedy soup (20 m, released) | 20 m native | seen sites | 799 | 0.526 | 0.689 | 0.724 | 0.658 | 0.926 | 0.835 |
+| CPU greedy soup (20 m, released) | 20 m native | **unseen sites** | 251 | 0.447 | 0.618 | 0.654 | 0.586 | 0.813 | 0.793 |
+
+- On unseen sites `fr_neg` loses about 0.11 IoU and 0.14 chip detection compared with seen sites. The CPU soup loses about 0.08 IoU
+  and 0.11 detection. The all-test numbers are therefore optimistic for new sites. Expect something nearer the unseen rows.
+- FA is lower on the unseen subset (0.45 against 0.58 for `fr_neg`). That reflects a different mix of scenes, not better
+  generalisation, and FA is still an upper bound measured on references from known emitter sites.
+- 251 chips from 92 sites is a small sample: single runs, no confidence intervals. The subsets were defined after release and were
+  not used to pick weights or thresholds.
+- Per-row numbers: `test_seen_unseen.csv`. Script: `src/score_seen_unseen.py` in the
+  [GitHub repo](https://github.com/grok-sibot/methane-plume-se2).
+
 ## Size and speed
 
 | | |
@@ -124,6 +163,8 @@ How to read the table:
 
 ## Limitations
 
+- 76 % of test chips come from sites seen in training (the official split is by year). On the 251 unseen-site test chips,
+  IoU and detection are clearly lower; see "Seen vs unseen sites".
 - **Chips are centred on known emitters.** The model has only seen 2 km chips around MARS-detected
   sources. Onboard use over full swaths would need tiling, plus far more negative data. Expect many
   more false alarms on arbitrary scenes.
