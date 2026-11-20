@@ -1,35 +1,55 @@
 import nbformat as nbf
 nb = nbf.v4.new_notebook(); C = []
 def md(s): C.append(nbf.v4.new_markdown_cell(s.strip('\n')))
+import io, tokenize
+GUARD = False  # cells added while True run only when SKIP is False (fr_neg already released and FORCE off -> no-op)
+def guard(src, cond='not SKIP'):
+    """Indent a cell under `if <cond>:`. Lines that start inside a multi-line string (or f-string) are left as they are,
+    so string contents (the card, infer.py, build_trt.sh) are byte-identical to the unguarded cell."""
+    src = src.strip('\n'); inside = set(); depth = 0; start = None
+    for tok in tokenize.generate_tokens(io.StringIO(src + '\n').readline):
+        if tok.type == tokenize.STRING and tok.end[0] > tok.start[0]:
+            inside.update(range(tok.start[0] + 1, tok.end[0] + 1))
+        elif tok.type == tokenize.FSTRING_START:
+            if depth == 0: start = tok.start[0]
+            depth += 1
+        elif tok.type == tokenize.FSTRING_END:
+            depth -= 1
+            if depth == 0 and tok.end[0] > start: inside.update(range(start + 1, tok.end[0] + 1))
+    lines = src.split('\n')
+    out = '\n'.join([f'if {cond}:'] + [l if (i + 1) in inside or not l.strip() else '    ' + l for i, l in enumerate(lines)])
+    compile(out, '<guarded cell>', 'exec')
+    return out
 def code(s, tags=None):
+    if GUARD: s = guard(s)
     c = nbf.v4.new_code_cell(s.strip('\n'))
     if tags: c.metadata['tags'] = tags
     C.append(c)
 
 md(r'''
-# Swap the released full-res methane model to `fr_neg` at threshold 0.5
+# Release `fr_neg` at threshold 0.5 on the full-res methane model
 
-This notebook changes the release of [`sighmon/methane-plume-se2-fullres`](https://huggingface.co/sighmon/methane-plume-se2-fullres)
-from `fr_ft_s0` (picked by val IoU, threshold 0.7) to `fr_neg` (lowest val false-alarm rate) at threshold 0.5. It also rewrites the model card
-and pushes everything as **one commit**.
+This notebook makes [`sighmon/methane-plume-se2-fullres`](https://huggingface.co/sighmon/methane-plume-se2-fullres) release `fr_neg`
+(lowest val false-alarm rate) at threshold 0.5, rewrites the model card, and pushes everything as **one commit**.
 
-**It has two paths and picks one automatically:**
+**It reads the live release first.** The previous release (model and threshold) comes from the repo's `results.json` and `config.json`, not
+from a hard-coded name. If the repo **already** releases `fr_neg` at 0.5, the notebook stops after section 4 and changes nothing, unless
+`FORCE = True` (which rebuilds the files and, with `UPLOAD = True`, pushes them again).
 
-1. **Weights present.** If this runtime still has `/content/methane-fullres/runs/fr_neg/final.pt` from the full run, it uses that file. The
-   recorded numbers from the first run stay in the card. The weights are re-evaluated as a check.
-2. **Weights gone** (a new runtime). It re-downloads MethaneSET, rebuilds the 10 m cache, and retrains `fr_base` then `fr_neg` with the same settings and
-   seeds as the original notebook. It then re-evaluates `fr_neg`. The card uses the **new** numbers and says clearly that the weights were retrained and
-   can differ slightly from the first run, because GPU training is not bit-for-bit deterministic.
+**Where the `fr_neg` weights come from, in order:**
 
-**How to run:** pick a GPU runtime (T4 is fine), keep the `HF_TOKEN` Colab secret, then *Runtime → Run all*. `UPLOAD = True` is the default because the
+1. **This runtime.** `runs/fr_neg/final.pt` from the full run, if it is still on disk.
+2. **The private checkpoint repo** (`PULL_PRIVATE_RUNS = True`): `sighmon/methane-fullres-runs/fr_neg/final.pt`. Needs an HF token with read access.
+3. **Retrain** `fr_base` then `fr_neg` with the original settings and seeds. The card then uses the new numbers and says the weights were retrained.
+
+Either way the weights are re-evaluated on val and test, and the card says if the numbers do not reproduce.
+
+**Safe to `%run` inside an open notebook:** pip is skipped when the packages already import, an existing 10 m cache is reused and
+memory-mapped (never copied into RAM again), and the HF token is never printed. Note that `%run` copies this notebook's variables (`X`, `meta`, `mf`, ...)
+into the calling notebook when it finishes.
+
+**How to run:** a GPU runtime (T4 is fine) with the `HF_TOKEN` Colab secret, then *Runtime → Run all*. `UPLOAD = True` is the default because the
 swap is approved. Set it to False to build the files without publishing.
-
-| path | T4 (estimate) |
-|---|---|
-| weights present (export, card, upload) | ≈5–10 min |
-| retrain (download, cache, `fr_base` 15 ep, `fr_neg` 8 ep, eval, export, upload) | ≈15–25 min |
-
-These estimates come from the measured first run on a T4: 84 s download, 135 s cache build, 3.5 min for `fr_base` and 1.7 min for `fr_neg`.
 ''')
 
 md('## 1. Config')
@@ -37,10 +57,16 @@ code(r'''
 SMOKE_TEST = False          # True: a few chips, 1 epoch, never uploads. Proves the notebook executes; numbers mean nothing.
 UPLOAD = True               # approved: push the swap to HF_REPO as one commit
 UPLOAD_IF_NOT_LOWEST = False  # safety: if a retrained fr_neg no longer has the lowest val FA, do not upload unless this is True
+FORCE = False               # True: rebuild (and, with UPLOAD, re-push) even if the repo already releases RELEASE at RELEASE_THR
 FORCE_RETRAIN = False       # True: retrain fr_neg even if runs/fr_neg/final.pt exists (the old one is moved to runs/fr_neg_first_run)
+PULL_PRIVATE_RUNS = True    # if runs/<name>/final.pt is missing, download it from RUNS_REPO before falling back to retraining
+RUNS_REPO = 'sighmon/methane-fullres-runs'   # private checkpoint repo (read access needed)
 HF_REPO = 'sighmon/methane-plume-se2-fullres'
 RELEASE, RELEASE_THR = 'fr_neg', 0.5
-PREV_RELEASE, PREV_THR = 'fr_ft_s0', 0.7
+# Earlier releases, used for the card only when the live results.json has no `release_history` yet (model, threshold, note).
+KNOWN_HISTORY = [('fr_ft_s0', 0.7, 'first Colab run, highest val IoU'),
+                 ('fr_base', 0.7, 'second Colab run of the same notebook (retrained from scratch), highest val IoU')]
+CACHE_PATH = None           # optional path to an existing cache10m.npy; it is reused and memory-mapped
 COMMIT_MSG = 'Release fr_neg (lowest val false-alarm rate) at threshold 0.5'
 WORK = None                 # None = /content/methane-fullres on Colab (same as the full run), ./methane-fullres elsewhere
 # ---- the original notebook's settings for (a) fr_base and (b) fr_neg; do not change if you want a faithful retrain ----
@@ -57,10 +83,16 @@ code(r'''
 import os, sys, subprocess, json, time, shutil, glob, platform
 T0 = time.time()
 IN_COLAB = 'google.colab' in sys.modules or os.path.exists('/content')
-if IN_COLAB:
-    subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'segmentation-models-pytorch==0.6.0', 'trackio',
-                    'rasterio', 'onnx', 'onnxruntime', 'onnxscript', 'fvcore', 'safetensors', 'psutil',
-                    'huggingface_hub>=0.34', 'pyarrow'], check=True)
+import importlib.util
+PKGS = {'segmentation_models_pytorch': 'segmentation-models-pytorch==0.6.0', 'trackio': 'trackio', 'rasterio': 'rasterio',
+        'onnx': 'onnx', 'onnxruntime': 'onnxruntime', 'onnxscript': 'onnxscript', 'fvcore': 'fvcore', 'safetensors': 'safetensors',
+        'psutil': 'psutil', 'huggingface_hub': 'huggingface_hub>=0.34', 'pyarrow': 'pyarrow', 'matplotlib': 'matplotlib'}
+MISSING = [pip for mod, pip in PKGS.items() if importlib.util.find_spec(mod) is None]
+if MISSING:
+    print('installing missing packages:', MISSING)
+    subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', *MISSING], check=True)
+else:
+    print('all packages already importable: skipping pip (nothing in this kernel gets upgraded)')
 import numpy as np, pandas as pd, torch
 if SMOKE_TEST:
     BASE_EPOCHS = NEG_FT_EPOCHS = 1; CAL_N = 8; BATCH_SIZE = 4
@@ -68,7 +100,7 @@ WORK = WORK or ('/content/methane-fullres' if IN_COLAB else os.path.abspath('met
 DATA, RUNS, OUT = f'{WORK}/data', f'{WORK}/runs', f'{WORK}/hf_swap'
 shutil.rmtree(OUT, ignore_errors=True)
 for d in (DATA, RUNS, OUT): os.makedirs(d, exist_ok=True)
-os.environ['TRACKIO_DIR'] = f'{WORK}/trackio'; os.makedirs(os.environ['TRACKIO_DIR'], exist_ok=True)
+os.environ.setdefault('TRACKIO_DIR', f'{WORK}/trackio'); os.makedirs(os.environ['TRACKIO_DIR'], exist_ok=True)  # keep the caller's under %run
 DEV = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 WORKERS = WORKERS if WORKERS is not None else min(4, os.cpu_count() or 2)
 GPU = torch.cuda.get_device_name(0) if DEV.type == 'cuda' else 'none (CPU)'
@@ -86,6 +118,8 @@ try:
     except Exception: pass
     if tok:
         login(token=tok, add_to_git_credential=False); HF_OK = True
+    elif os.environ.get('HF_TOKEN'):  # huggingface_hub reads it from the environment; nothing is written to disk
+        HF_OK = True
     elif UPLOAD and not SMOKE_TEST:
         from huggingface_hub import notebook_login; notebook_login(); HF_OK = True
     print('logged in as', whoami()['name']) if HF_OK else print('no HF token (fine for a smoke test)')
@@ -94,37 +128,71 @@ except Exception as e:
     print('HF login skipped:', type(e).__name__, e)
 ''')
 
-md('## 4. Fetch the first run\'s results and training code from the repo\nThis reads `results.json`, `comparison_test.csv` and `src/methane_fullres.py`. The local copy of the module from the full run is used if it is there. Either way it is the same file.')
+md('## 4. Read the live release, results and training code from the repo\nThis reads `results.json`, `config.json`, `comparison_test.csv` and `src/methane_fullres.py`. The previous release is whatever the repo releases now. If that is already `fr_neg` at 0.5 and `FORCE` is off, every later cell is skipped.')
 code(r'''
 from huggingface_hub import hf_hub_download, HfApi
 REPO_FILES = set(HfApi().list_repo_files(HF_REPO))
 ORIG_DIR = f'{WORK}/first_run'; os.makedirs(ORIG_DIR, exist_ok=True)
-for f in ['results.json', 'comparison_test.csv', 'src/methane_fullres.py']:
-    hf_hub_download(HF_REPO, f, local_dir=ORIG_DIR)
+for f in ['results.json', 'config.json', 'comparison_test.csv', 'src/methane_fullres.py']:
+    hf_hub_download(HF_REPO, f, local_dir=ORIG_DIR, force_download=True)
 if not os.path.exists(f'{WORK}/methane_fullres.py'):
     shutil.copy(f'{ORIG_DIR}/src/methane_fullres.py', f'{WORK}/methane_fullres.py')
 import importlib
 sys.path.insert(0, WORK); import methane_fullres as mf; importlib.reload(mf)
 R0 = json.load(open(f'{ORIG_DIR}/results.json')); ORIG = R0['results']; CMP0 = pd.read_csv(f'{ORIG_DIR}/comparison_test.csv')
+LIVE_CFG = json.load(open(f'{ORIG_DIR}/config.json'))
+base = lambda n: str(n).split(' ')[0]  # 'fr_neg (retrained)' -> 'fr_neg'
+LIVE = (base(R0['selected']), float(R0['selected_threshold']))
+if (base(LIVE_CFG.get('model', LIVE[0])), float(LIVE_CFG.get('threshold', LIVE[1]))) != LIVE:
+    print('WARNING: results.json and config.json disagree on the live release:', LIVE, 'vs', (LIVE_CFG.get('model'), LIVE_CFG.get('threshold')))
+ALREADY = LIVE[0] == RELEASE and abs(LIVE[1] - RELEASE_THR) < 1e-9
+HISTORY = [dict(h) for h in R0.get('release_history', [])] or [dict(model=m, threshold=t, note=n) for m, t, n in KNOWN_HISTORY]
+if ALREADY:  # the release before this one comes from the selection record the earlier swap wrote
+    HISTORY = [h for h in HISTORY if not (base(h['model']) == RELEASE and abs(h['threshold'] - RELEASE_THR) < 1e-9)]
+    PREV = R0.get('selection', {}).get('previous') or dict(selected=HISTORY[-1]['model'], threshold=HISTORY[-1]['threshold'],
+                                                          criterion='highest val IoU at the val-picked threshold')
+else:
+    PREV = dict(selected=LIVE[0], threshold=LIVE[1], criterion=R0.get('selection', {}).get('criterion', 'highest val IoU at the val-picked threshold'))
+    if not HISTORY or (base(HISTORY[-1]['model']), HISTORY[-1]['threshold']) != LIVE:
+        HISTORY.append(dict(model=LIVE[0], threshold=LIVE[1], note=PREV['criterion']))
+PREV_RELEASE, PREV_THR = base(PREV['selected']), float(PREV['threshold'])
+SKIP = ALREADY and not FORCE
 assert RELEASE in ORIG and PREV_RELEASE in ORIG, 'unexpected results.json'
-print('first run: selected', R0['selected'], '@', R0['selected_threshold'], '| GPU', R0.get('gpu'), '| models', list(ORIG))
+print('live release:', R0['selected'], '@', R0['selected_threshold'], '| GPU', R0.get('gpu'), '| models', list(ORIG))
+print('previous release for the card:', PREV_RELEASE, '@', PREV_THR, '| history:', [(h['model'], h['threshold']) for h in HISTORY])
+if SKIP:
+    print(f'{HF_REPO} already releases {RELEASE} at {RELEASE_THR}: nothing to do. Every later cell is skipped. Set FORCE = True to rebuild anyway.')
+elif ALREADY:
+    print(f'FORCE = True: rebuilding although {RELEASE} at {RELEASE_THR} is already released.')
 ''')
 
-md('## 5. Which path?')
+GUARD = True
+md('## 5. Which path?\nWeights in this runtime, else the private checkpoint repo (`PULL_PRIVATE_RUNS`), else retrain.')
 code(r'''
 CK = f'{RUNS}/{RELEASE}/final.pt'
 if FORCE_RETRAIN and os.path.exists(CK):
     shutil.rmtree(f'{RUNS}/{RELEASE}_first_run', ignore_errors=True); shutil.move(f'{RUNS}/{RELEASE}', f'{RUNS}/{RELEASE}_first_run')
+PULLED = []
+def pull_run(name):
+    if os.path.exists(f'{RUNS}/{name}/final.pt') or not PULL_PRIVATE_RUNS or (FORCE_RETRAIN and name == RELEASE): return
+    try:
+        for f in ('final.pt', 'history.json'): hf_hub_download(RUNS_REPO, f'{name}/{f}', local_dir=RUNS)
+        PULLED.append(name); print(f'pulled {name}/final.pt from {RUNS_REPO}')
+    except Exception as e:
+        print(f'could not pull {name} from {RUNS_REPO} ({type(e).__name__}); falling back to', 'fr_base/retraining' if name == RELEASE else 'retraining')
+pull_run(RELEASE)
+if not os.path.exists(CK): pull_run('fr_base')
 RETRAINED = not os.path.exists(CK)
 BASE_RETRAINED = RETRAINED and not os.path.exists(f'{RUNS}/fr_base/final.pt')
-print('weights present: using', CK) if not RETRAINED else print(
+print('weights present' + (f' (pulled from {RUNS_REPO})' if RELEASE in PULLED else '') + ': using', CK) if not RETRAINED else print(
     f'{CK} not found: will retrain', 'fr_base and fr_neg' if BASE_RETRAINED else 'fr_neg (reusing the existing fr_base/final.pt)')
 ''')
 
 md('## 6. Data (MethaneSET S2 finetune v1.4.0 and the 10 m cache)\nThe cache is reused when it is already there. The export and the re-evaluation need it on both paths.')
 code(r'''
 REPO, SUB = 'tacofoundation/methaneset', 'methaneset-s2-finetune'
-CACHE = f'{DATA}/cache10m.npy'
+CACHE = CACHE_PATH or f'{DATA}/cache10m.npy'
+print('reusing existing cache', CACHE) if os.path.exists(CACHE) else print('no cache yet: download + build', CACHE)
 meta_files = {f: hf_hub_download(REPO, f'{SUB}/.tacocat/{f}', repo_type='dataset', local_dir=DATA)
               for f in ['level0.parquet', 'level1.parquet', 'COLLECTION.json']}
 l0 = pd.read_parquet(meta_files['level0.parquet']).reset_index(drop=True)
@@ -143,7 +211,7 @@ if SMOKE_TEST:  # same round-robin smoke splits as the original notebook
     meta['split'] = [['train', 'train', 'validation', 'test'][i % 4] for i in range(len(meta))]
 if not os.path.exists(CACHE):
     mf.build_cache(l0, l1, ZIPDIR, CACHE, workers=os.cpu_count())
-X = mf.load_cache(CACHE)
+X = mf.load_cache(CACHE, to_ram=False)  # memory-mapped: no second 8.9 GB copy in RAM next to the full run's
 assert X.shape[1:] == (31, 200, 200) and len(X) == len(meta)
 tr = np.where(meta.split == 'train')[0]; va = np.where(meta.split == 'validation')[0]; te = np.where(meta.split == 'test')[0]
 print('train/val/test', len(tr), len(va), len(te))
@@ -199,9 +267,10 @@ R = dict(R0)
 R['selected'], R['selected_threshold'] = RELEASE, RELEASE_THR
 R['selection'] = dict(
     criterion="lowest val false-alarm rate (10 m, each model's val-picked threshold); released at the default threshold 0.5",
-    previous=dict(selected=PREV_RELEASE, threshold=PREV_THR, criterion="highest val IoU at the val-picked threshold"),
+    previous=dict(selected=PREV_RELEASE, threshold=PREV_THR, criterion=PREV.get('criterion', 'highest val IoU at the val-picked threshold')),
     changed_after_seeing_test=True, weights_retrained=RETRAINED, fr_base_retrained=BASE_RETRAINED,
-    released_metrics_key=REL_KEY, smoke_test=SMOKE_TEST)
+    released_metrics_key=REL_KEY, smoke_test=SMOKE_TEST, weights_pulled_from=RUNS_REPO if RELEASE in PULLED else None)
+R['release_history'] = HISTORY + [dict(model=RELEASE, threshold=RELEASE_THR, note='lowest val false-alarm rate (this release)')]
 if USE_NEW:
     R['results'] = dict(R0['results']); R['results'][REL_KEY] = NEW
     R['retrain_minutes'] = {k: v / 60 for k, v in RUN_TIMES.items()}; R['retrain_gpu'] = GPU
@@ -377,7 +446,7 @@ f.tight_layout(); f.savefig(f'{OUT}/example_predictions.png', dpi=110); plt.clos
 print(sorted(os.listdir(OUT)))
 ''')
 
-md('## 12. Model card\nThe card is generated from the measured numbers. It discloses the change of selection rule, that test numbers were seen before the change, and the `fr_ft_s0` regression.')
+md('## 12. Model card\nThe card is generated from the measured numbers. It discloses the change of selection rule, that test numbers were seen before the change, and the full release history.')
 code(r'''
 def r3(v): return f'{v:.3f}'
 def row(n, d): return f"| {n} | " + ' | '.join(r3(d[k]) for k in K) + ' |'
@@ -426,14 +495,21 @@ elif not REEVAL_MATCH:
                     f"(max difference {diff:.3f}), so the released numbers below come from the re-evaluation.\n")
 else:
     retrain_note = ''
+hist_md = '\n'.join(f"{i + 1}. `{h['model']}` at {h['threshold']}: {h.get('note', '').rstrip('.')}." for i, h in enumerate(HISTORY)) + \
+    f"\n{len(HISTORY) + 1}. `{REL_NAME}` at {RELEASE_THR} (this release): lowest val false-alarm rate." + \
+    (f" The checkpoint was pulled from the private repo `{RUNS_REPO}`, not retrained." if RELEASE in PULLED else '')
+below = '*below*' if p['test@thr/20m']['iou'] < cpu_soup['iou'] else 'above'
+ranking_note = 'The val IoU ranking did not carry over to test.' if below == '*below*' else 'IoU was not the problem; false alarms were.'
 sel = f"""## Which weights are released, and why they changed
 
-The released weights are **`{REL_NAME}` at threshold {RELEASE_THR}**. They replace `{PREV_RELEASE}` at {PREV_THR}, which the first version of this repo shipped.
+The released weights are **`{REL_NAME}` at threshold {RELEASE_THR}**. Release history of this repo:
+
+{hist_md}
 {retrain_note}
-- **Original rule:** the notebook picked the model with the highest **val IoU** at its val-picked threshold. That chose `{PREV_RELEASE}` (val IoU
+- **Original rule (earlier releases):** the notebook picked the model with the highest **val IoU** at its val-picked threshold. That chose `{PREV_RELEASE}` (val IoU
   {r3(p['val@thr/10m']['iou'])} at {p['threshold']}). The val split has only 193 chips, so IoU differences of about 0.01 between models are within noise.
 - **What went wrong:** on test, `{PREV_RELEASE}` at {PREV_THR} scored IoU {r3(p['test@thr/20m']['iou'])} and FA {r3(p['test@thr/20m']['false_alarm'])} (20 m grid). That
-  is *below* the 20 m CPU model ({r3(cpu_soup['iou'])} IoU, FA {r3(cpu_soup['false_alarm'])}). The val IoU ranking did not carry over to test.
+  is {below} the 20 m CPU model ({r3(cpu_soup['iou'])} IoU, FA {r3(cpu_soup['false_alarm'])}). {ranking_note}
 - **New rule:** the lowest **val false-alarm rate**, because false alarms are what cost downlink in onboard alerting. `fr_neg` has val FA
   {r3(o['val@thr/10m']['false_alarm'])}, against {r3(others_fa[0])} or more for every other model. That is a much bigger margin than the IoU spread. By val IoU,
   `fr_neg` ranked *lower* ({r3(o['val@thr/10m']['iou'])} at {o['threshold']}).
@@ -467,7 +543,7 @@ JetPack 6.2, TensorRT 10.3, 10–25 W).
 Spiral Blue.** It has not been run on Jetson hardware.
 
 **Released weights: `{REL_NAME}` at threshold {RELEASE_THR}** (fine-tuned with plume-free pairs, chosen for the lowest val false-alarm rate).
-The section below explains the change from `{PREV_RELEASE}`.
+The section below explains the change from the earlier releases ({', '.join(f"`{h['model']}` at {h['threshold']}" for h in HISTORY)}).
 
 ## Input contract
 
@@ -483,7 +559,7 @@ The section below explains the change from `{PREV_RELEASE}`.
 ## Training
 
 The data is [MethaneSET](https://huggingface.co/datasets/tacofoundation/methaneset) `methaneset-s2-finetune` v1.4.0. It has 3,605 chips (200×200 at
-10 m) in the official site-grouped splits of 2,362 train, 193 val and 1,050 test, and is licensed CC BY-NC-SA 4.0. The first run was trained on {R0.get('gpu')} with AMP={AMP}, with the SWIR head in fp32.{f' The released weights were retrained on {GPU}.' if RETRAINED else ''}
+10 m) in the official site-grouped splits of 2,362 train, 193 val and 1,050 test, and is licensed CC BY-NC-SA 4.0. The run the metrics come from was trained on {R0.get('gpu')} with AMP={AMP}, with the SWIR head in fp32.{f' The released weights were retrained on {GPU}.' if RETRAINED else ''}
 
 - `fr_base`: ImageNet init, {BASE_EPOCHS} epochs, lr {LR}, rot90 and flips, seed 0. This is the CPU `base` recipe at 10 m.
 - **`fr_neg` (released)**: a fine-tune of `fr_base` for {NEG_FT_EPOCHS} epochs at lr {FT_LR}, seed 3. {int(NEG_P * 100)} % of chips are replaced by plume-free pairs (bg1 vs bg0).
@@ -519,7 +595,7 @@ Full comparison (`comparison_test.csv`: test split, both grids, at 0.5 and at ea
 
 - {INFO['params']:,} parameters; {INFO.get('gmacs', float('nan')):.2f} GMACs per 200×200 chip (fvcore); ONNX {INFO['onnx_bytes'] / 1e6:.1f} MB (opset 17, static).
 - ONNX vs PyTorch: max abs logit diff {INFO['onnx_max_abs_diff_logits']:.1e}, mask agreement {INFO['onnx_mask_agreement'] * 100:.2f} % on {INFO['parity_chips']} test chips.
-- Latency (batch 1): {lat}. CPU: {INFO['cpu']}. Jetson Orin NX FP16/INT8 was **not measured**; see `build_trt.sh`.
+- Latency (batch 1, measured where this notebook ran: GPU {GPU}, CPU {INFO['cpu']}): {lat}. Jetson Orin NX FP16/INT8 was **not measured**; see `build_trt.sh`.
 - The 10 m model does about 3× the compute of the 20 m model per 2 km chip.
 
 ## Files
@@ -527,7 +603,7 @@ Full comparison (`comparison_test.csv`: test split, both grids, at 0.5 and at ea
 `model.safetensors` and `{ONNX_NAME}` ({REL_NAME}), `config.json` (input contract and threshold {RELEASE_THR}), `infer.py` (default threshold {RELEASE_THR}),
 `build_trt.sh` (untested on Jetson), `{INFO['calibration']}` (INT8 calibration inputs from the train split, float16; they do not depend on the model),
 `results.json` (full threshold sweeps for every model, plus the `selection` record), `comparison_test.csv`, `training_history/`, `training_curves.png`,
-`threshold_sweep_val.png` (first run), `example_predictions.png` ({REL_NAME} at {RELEASE_THR}), and `src/methane_fullres.py`.
+`threshold_sweep_val.png` (training run), `example_predictions.png` ({REL_NAME} at {RELEASE_THR}), and `src/methane_fullres.py`.
 
 ## Limitations
 
@@ -565,6 +641,12 @@ if UPLOAD and not SMOKE_TEST and not HOLD:
 else:
     print('UPLOAD is False (or smoke test): nothing uploaded. Files ready in', OUT)
 print(f'total time {(time.time() - T0) / 60:.1f} min | path:', 'retrained' if RETRAINED else 'weights present')
+''')
+
+GUARD = False
+code(r'''
+if SKIP:
+    print(f'Nothing to do: {HF_REPO} already releases {RELEASE} at {RELEASE_THR} (live config threshold {LIVE_CFG.get("threshold")}). Nothing was built or uploaded.')
 ''')
 
 nb.cells = C
