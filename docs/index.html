@@ -34,7 +34,7 @@
     <div role="listitem"><span class="num">0.521</span><span class="lbl">test IoU</span></div>
     <div role="listitem"><span class="num">16.5&nbsp;MB</span><span class="lbl">ONNX model</span></div>
   </div>
-  <p class="fine">Recommended model <code>fr_neg</code>, 20&nbsp;m grid, threshold 0.5. Not affiliated with or endorsed by Spiral&nbsp;Blue.</p>
+  <p class="fine">Released model <code>fr_neg</code>, 20&nbsp;m grid, threshold 0.5. Not affiliated with or endorsed by Spiral&nbsp;Blue.</p>
 </section>
 
 <section id="problem" class="block reveal">
@@ -95,7 +95,7 @@
     <figure class="chart" aria-labelledby="c1">
       <figcaption id="c1"><strong>IoU</strong> <span>higher is better</span></figcaption>
       <ul>
-        <li><span class="name">fr_neg <em>recommended</em></span><span class="bar"><i class="hl" style="--v:.521"></i></span><span class="val">0.521</span></li>
+        <li><span class="name">fr_neg <em>released</em></span><span class="bar"><i class="hl" style="--v:.521"></i></span><span class="val">0.521</span></li>
         <li><span class="name">fr uniform soup</span><span class="bar"><i style="--v:.522"></i></span><span class="val">0.522</span></li>
         <li><span class="name">fr_base</span><span class="bar"><i style="--v:.511"></i></span><span class="val">0.511</span></li>
         <li><span class="name">CPU greedy soup</span><span class="bar"><i style="--v:.509"></i></span><span class="val">0.509</span></li>
@@ -105,7 +105,7 @@
     <figure class="chart" aria-labelledby="c2">
       <figcaption id="c2"><strong>False-alarm rate</strong> <span>lower is better</span></figcaption>
       <ul>
-        <li><span class="name">fr_neg <em>recommended</em></span><span class="bar"><i class="hl" style="--v:.550"></i></span><span class="val">0.550</span></li>
+        <li><span class="name">fr_neg <em>released</em></span><span class="bar"><i class="hl" style="--v:.550"></i></span><span class="val">0.550</span></li>
         <li><span class="name">fr uniform soup</span><span class="bar"><i style="--v:.787"></i></span><span class="val">0.787</span></li>
         <li><span class="name">fr_base</span><span class="bar"><i style="--v:.902"></i></span><span class="val">0.902</span></li>
         <li><span class="name">CPU greedy soup</span><span class="bar"><i style="--v:.825"></i></span><span class="val">0.825</span></li>
@@ -120,7 +120,7 @@
       <tr><th scope="col">Model</th><th scope="col">Trained at</th><th scope="col">IoU</th><th scope="col">F1</th><th scope="col">Precision</th><th scope="col">Recall</th><th scope="col">Detection</th><th scope="col">False alarm</th></tr>
     </thead>
     <tbody>
-      <tr class="hl"><th scope="row">fr_neg (recommended)</th><td>10 m</td><td>0.521</td><td>0.685</td><td>0.745</td><td>0.634</td><td>0.839</td><td>0.550</td></tr>
+      <tr class="hl"><th scope="row">fr_neg (released)</th><td>10 m</td><td>0.521</td><td>0.685</td><td>0.745</td><td>0.634</td><td>0.839</td><td>0.550</td></tr>
       <tr><th scope="row">fr uniform soup</th><td>10 m</td><td>0.522</td><td>0.686</td><td>0.733</td><td>0.644</td><td>0.906</td><td>0.787</td></tr>
       <tr><th scope="row">fr_base</th><td>10 m</td><td>0.511</td><td>0.677</td><td>0.742</td><td>0.622</td><td>0.934</td><td>0.902</td></tr>
       <tr><th scope="row">CPU greedy soup</th><td>20 m</td><td>0.509</td><td>0.675</td><td>0.710</td><td>0.643</td><td>0.899</td><td>0.825</td></tr>
@@ -139,7 +139,7 @@
     <div><span class="num">~11&nbsp;ms</span><span class="lbl">PyTorch FP16, Tesla T4</span></div>
     <div><span class="num">1.10</span><span class="lbl">GMACs per 200×200 chip (10 m, 2&nbsp;km)</span></div>
   </div>
-  <p class="fine">Batch 1, full-resolution model. Measured on the <code>fr_base</code> export, which shares <code>fr_neg</code>'s architecture. Jetson latency not measured.</p>
+  <p class="fine">Batch 1, full-resolution model. The ~31&nbsp;ms and ~11&nbsp;ms figures were measured on Colab on the <code>fr_base</code> export, which shares <code>fr_neg</code>'s architecture. The released <code>fr_neg</code> export measured 15.9&nbsp;ms (1 thread) with ONNX Runtime on a different, shared 8&nbsp;vCPU machine. Jetson latency not measured.</p>
 
   <figure class="figure">
     <img src="assets/example_predictions.png" alt="Grid of test chips showing the RGB image, the analyst plume label and the model's predicted plume mask side by side." loading="lazy" width="1100" height="1716">
@@ -162,7 +162,7 @@
     <li><strong>The selection rule changed after test numbers were seen.</strong> Release selection moved from validation IoU to validation false-alarm rate, which favours <code>fr_neg</code>. Its test numbers are therefore not a clean held-out estimate.</li>
     <li><strong>Non-commercial.</strong> Training data is MethaneSET under CC&nbsp;BY-NC-SA&nbsp;4.0, so the weights are too.</li>
   </ul>
-  <p class="note">The full-resolution Hugging Face card currently releases <code>fr_base</code> at threshold 0.7. A swap to <code>fr_neg</code> at 0.5 is pending.</p>
+  <p class="note">Released: <code>fr_neg</code> at threshold 0.5 on the full-resolution Hugging Face card. It replaces two earlier releases, <code>fr_ft_s0</code> at 0.7 and then <code>fr_base</code> at 0.7, both picked by validation IoU.</p>
 </section>
 
 <section id="links" class="block reveal">

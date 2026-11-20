@@ -17,6 +17,12 @@ TensorRT 10.3, 10–25 W).
 **Demo / research model by Simon Loffler ([@sighmon](https://github.com/sighmon)). Not affiliated with,
 endorsed by, or tested by Spiral Blue.** It has not been run on Jetson hardware yet.
 
+> **Full-resolution model.** This card covers the 20 m CPU model. The 10 m full-resolution model,
+> [sighmon/methane-plume-se2-fullres](https://huggingface.co/sighmon/methane-plume-se2-fullres), now releases **`fr_neg` at
+> threshold 0.5** (test, 20 m-equivalent grid: IoU 0.521, F1 0.685, P 0.745, R 0.634, det 0.839, FA 0.550). Its selection rule
+> was changed to the lowest val false-alarm rate after test numbers had been seen; the earlier releases were `fr_ft_s0` at 0.7,
+> then `fr_base` at 0.7. See [`fullres/MODEL_CARD.md`](fullres/MODEL_CARD.md) and `fullres/results.json`.
+
 ## What it does
 
 - **Input** `reflectance`: float32 `1×8×100×100`. These are top-of-atmosphere reflectance values

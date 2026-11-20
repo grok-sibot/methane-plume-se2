@@ -1,0 +1,26 @@
+{
+ "input_name": "reflectance",
+ "input_shape": [
+  1,
+  8,
+  200,
+  200
+ ],
+ "input_bands": [
+  "T_B2",
+  "T_B3",
+  "T_B4",
+  "T_B8A",
+  "T_B11",
+  "T_B12",
+  "R_B11",
+  "R_B12"
+ ],
+ "scale": "L1C DN / 10000",
+ "resolution_m": 10,
+ "output_name": "plume_logits",
+ "threshold": 0.5,
+ "min_chip_pixels": 40,
+ "encoder": "mobilenet_v2",
+ "model": "fr_neg"
+}

@@ -1,0 +1,18 @@
+{
+ "model": "fr_neg",
+ "encoder": "mobilenet_v2",
+ "threshold": 0.5,
+ "params": 4133819,
+ "onnx_bytes": 16532176,
+ "input": "reflectance float32 1x8x200x200",
+ "output": "plume_logits float32 1x1x200x200",
+ "onnx_max_abs_diff_logits": 0.00075531005859375,
+ "onnx_mask_agreement": 1.0,
+ "parity_chips": 32,
+ "gmacs": 1.095162048,
+ "ort_cpu_ms_1t": 15.861043459990467,
+ "ort_cpu_ms_8t": 5.914428100004443,
+ "cpu": "x86_64",
+ "calibration": "calibration_train256.npy",
+ "measured_on": "CPU-only box (shared 8 vCPU x86_64, onnxruntime); exported from the second Colab run's fr_neg/final.pt, not retrained"
+}
