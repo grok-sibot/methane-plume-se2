@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Methane plume detector for the Spiral Blue SE-2</title>
+<meta name="description" content="A 4.13M-parameter U-Net that segments methane plumes in Sentinel-2 imagery, sized for the Spiral Blue SE-2 edge computer. A demo project by Simon Loffler.">
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="nav" role="banner">
+  <div class="nav-inner">
+    <a class="brand" href="#top">Methane&nbsp;SE-2</a>
+    <nav aria-label="Sections">
+      <a href="#problem">Problem</a>
+      <a href="#hardware">Hardware</a>
+      <a href="#how">How it works</a>
+      <a href="#results">Results</a>
+      <a href="#caveats">Caveats</a>
+      <a href="#links">Links</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<section class="hero" id="top">
+  <p class="eyebrow">Demo project · Simon Loffler</p>
+  <h1>Methane plumes,<br>spotted in orbit.</h1>
+  <p class="lede">A small neural network that finds methane plumes in Sentinel-2 imagery, sized to run on the Spiral&nbsp;Blue SE-2 edge computer.</p>
+  <div class="hero-stats" role="list">
+    <div role="listitem"><span class="num">4.13M</span><span class="lbl">parameters</span></div>
+    <div role="listitem"><span class="num">0.521</span><span class="lbl">test IoU</span></div>
+    <div role="listitem"><span class="num">16.5&nbsp;MB</span><span class="lbl">ONNX model</span></div>
+  </div>
+  <p class="fine">Recommended model <code>fr_neg</code>, 20&nbsp;m grid, threshold 0.5. Not affiliated with or endorsed by Spiral&nbsp;Blue.</p>
+</section>
+
+<section id="problem" class="block reveal">
+  <p class="eyebrow">The problem</p>
+  <h2>Find the leak before the downlink.</h2>
+  <div class="cols">
+    <p>Methane super-emitters, such as the onshore oil, gas and coal sites in the training data, show up in Sentinel-2's shortwave-infrared bands as a faint dip in band&nbsp;12 relative to band&nbsp;11. The signal is around 1&nbsp;% of reflectance.</p>
+    <p>Satellites can capture far more imagery than they can send down. Screening scenes on board means only chips with a likely plume need to be downlinked first, and an alert can go out sooner.</p>
+  </div>
+  <p class="note">Spiral&nbsp;Blue is a partner on LatConnect&nbsp;60's SWIRSAT methane mission, supplying its onboard computers (<a href="https://www.spiralblue.space/news/spiral-blue-announces-key-partnership-in-latconnect-60-ltd-s-swirsat-mission">Spiral Blue announcement, June 2024</a>). That mission uses the earlier SE-1; this project targets the SE-2.</p>
+</section>
+
+<section id="hardware" class="block reveal">
+  <p class="eyebrow">The target</p>
+  <h2>Spiral Blue SE-2.</h2>
+  <dl class="specs">
+    <div><dt>Module</dt><dd>NVIDIA Jetson Orin NX 16GB</dd></div>
+    <div><dt>Software</dt><dd>JetPack 6.2 · TensorRT 10.3</dd></div>
+    <div><dt>Power</dt><dd>10–25 W</dd></div>
+    <div><dt>Deploy path</dt><dd>ONNX opset 17, static shape → TensorRT FP16 / INT8 via <code>build_trt.sh</code></dd></div>
+  </dl>
+  <p class="note">The model has not yet been run on Jetson hardware. Speeds below were measured on a CPU and a Colab T4.</p>
+</section>
+
+<section id="how" class="block reveal">
+  <p class="eyebrow">How it works</p>
+  <h2>Compare the scene with itself.</h2>
+  <ol class="steps">
+    <li>
+      <h3>Eight channels in</h3>
+      <p>Target-scene bands B2, B3, B4, B8A, B11 and B12, plus B11 and B12 from a plume-free reference image of the same site. Input is top-of-atmosphere reflectance.</p>
+    </li>
+    <li>
+      <h3>Physics inside the graph</h3>
+      <p>The model computes <code>log(B12/B11)</code> for the target minus the same for the reference, in fp32, and adds it as a ninth channel. The deployed engine needs no preprocessing beyond reflectance scaling.</p>
+    </li>
+    <li>
+      <h3>A small U-Net</h3>
+      <p>U-Net with a MobileNetV2 encoder, 4,133,819 parameters, trained with BCE plus Dice loss on MethaneSET (3,605 labelled Sentinel-2 chips, emitter-grouped splits).</p>
+    </li>
+    <li>
+      <h3>Teach it what “nothing” looks like</h3>
+      <p>During training, 30&nbsp;% of chips are swapped for plume-free pairs with an empty mask. This is the change that cut false alarms the most.</p>
+    </li>
+    <li>
+      <h3>Model soups</h3>
+      <p>Fine-tunes from one starting point were weight-averaged (<a href="https://arxiv.org/abs/2203.05482">Wortsman et al., 2022</a>). The gain was about one IoU point, which is suggestive rather than proven.</p>
+    </li>
+  </ol>
+</section>
+
+<section id="results" class="block reveal">
+  <p class="eyebrow">Results</p>
+  <h2>Measured, not promised.</h2>
+  <p class="sub">Held-out test split (1,050 chips), 20&nbsp;m grid, threshold 0.5. Single runs, no confidence intervals: treat differences of about 0.01 as noise.</p>
+
+  <div class="charts">
+    <figure class="chart" aria-labelledby="c1">
+      <figcaption id="c1"><strong>IoU</strong> <span>higher is better</span></figcaption>
+      <ul>
+        <li><span class="name">fr_neg <em>recommended</em></span><span class="bar"><i class="hl" style="--v:.521"></i></span><span class="val">0.521</span></li>
+        <li><span class="name">fr uniform soup</span><span class="bar"><i style="--v:.522"></i></span><span class="val">0.522</span></li>
+        <li><span class="name">fr_base</span><span class="bar"><i style="--v:.511"></i></span><span class="val">0.511</span></li>
+        <li><span class="name">CPU greedy soup</span><span class="bar"><i style="--v:.509"></i></span><span class="val">0.509</span></li>
+        <li><span class="name">CPU ft_neg</span><span class="bar"><i style="--v:.483"></i></span><span class="val">0.483</span></li>
+      </ul>
+    </figure>
+    <figure class="chart" aria-labelledby="c2">
+      <figcaption id="c2"><strong>False-alarm rate</strong> <span>lower is better</span></figcaption>
+      <ul>
+        <li><span class="name">fr_neg <em>recommended</em></span><span class="bar"><i class="hl" style="--v:.550"></i></span><span class="val">0.550</span></li>
+        <li><span class="name">fr uniform soup</span><span class="bar"><i style="--v:.787"></i></span><span class="val">0.787</span></li>
+        <li><span class="name">fr_base</span><span class="bar"><i style="--v:.902"></i></span><span class="val">0.902</span></li>
+        <li><span class="name">CPU greedy soup</span><span class="bar"><i style="--v:.825"></i></span><span class="val">0.825</span></li>
+        <li><span class="name">CPU ft_neg</span><span class="bar"><i style="--v:.562"></i></span><span class="val">0.562</span></li>
+      </ul>
+    </figure>
+  </div>
+
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Test results table">
+  <table>
+    <thead>
+      <tr><th scope="col">Model</th><th scope="col">Trained at</th><th scope="col">IoU</th><th scope="col">F1</th><th scope="col">Precision</th><th scope="col">Recall</th><th scope="col">Detection</th><th scope="col">False alarm</th></tr>
+    </thead>
+    <tbody>
+      <tr class="hl"><th scope="row">fr_neg (recommended)</th><td>10 m</td><td>0.521</td><td>0.685</td><td>0.745</td><td>0.634</td><td>0.839</td><td>0.550</td></tr>
+      <tr><th scope="row">fr uniform soup</th><td>10 m</td><td>0.522</td><td>0.686</td><td>0.733</td><td>0.644</td><td>0.906</td><td>0.787</td></tr>
+      <tr><th scope="row">fr_base</th><td>10 m</td><td>0.511</td><td>0.677</td><td>0.742</td><td>0.622</td><td>0.934</td><td>0.902</td></tr>
+      <tr><th scope="row">CPU greedy soup</th><td>20 m</td><td>0.509</td><td>0.675</td><td>0.710</td><td>0.643</td><td>0.899</td><td>0.825</td></tr>
+      <tr><th scope="row">CPU ft_neg</th><td>20 m</td><td>0.483</td><td>0.651</td><td>0.745</td><td>0.578</td><td>0.814</td><td>0.562</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="fine">IoU, F1, precision and recall are pixel-level, pooled over the split. <em>Detection</em>: share of plume chips where at least 0.4&nbsp;ha is predicted and overlaps the label. <em>False alarm</em>: share of plume-free reference pairs with at least 0.4&nbsp;ha predicted. Full-resolution (“fr”) models are scored on the same 20&nbsp;m grid for a like-for-like comparison. Source: <code>results.json</code> and the full-res model's <code>comparison_test.csv</code>.</p>
+
+  <div class="takeaway">
+    <p><strong>The takeaway.</strong> Full resolution and soups nudged IoU up by about a point. Training on plume-free pairs did far more for the number that matters on orbit: <code>fr_neg</code> flags 55&nbsp;% of plume-free pairs against 90&nbsp;% for <code>fr_base</code>, at the cost of lower detection (0.839 vs 0.934).</p>
+  </div>
+
+  <div class="speed">
+    <div><span class="num">~31&nbsp;ms</span><span class="lbl">ONNX Runtime, x86 CPU, 1 thread</span></div>
+    <div><span class="num">~11&nbsp;ms</span><span class="lbl">PyTorch FP16, Tesla T4</span></div>
+    <div><span class="num">1.10</span><span class="lbl">GMACs per 200×200 chip (10 m, 2&nbsp;km)</span></div>
+  </div>
+  <p class="fine">Batch 1, full-resolution model. Measured on the <code>fr_base</code> export, which shares <code>fr_neg</code>'s architecture. Jetson latency not measured.</p>
+
+  <figure class="figure">
+    <img src="assets/example_predictions.png" alt="Grid of test chips showing the RGB image, the analyst plume label and the model's predicted plume mask side by side." loading="lazy" width="1100" height="1716">
+    <figcaption>Example test predictions from the 20&nbsp;m CPU model: image, label, prediction.</figcaption>
+  </figure>
+  <figure class="figure">
+    <img src="assets/training_curves.png" alt="Training loss and validation IoU curves for the CPU base run, fine-tunes and soups." loading="lazy" width="2040" height="456">
+    <figcaption>Training curves for the 20&nbsp;m CPU runs. Live dashboards are linked below.</figcaption>
+  </figure>
+</section>
+
+<section id="caveats" class="block reveal">
+  <p class="eyebrow">Caveats</p>
+  <h2>What this is not.</h2>
+  <ul class="caveats">
+    <li><strong>Not tested on a Jetson.</strong> The TensorRT build script is written but untested on SE-2 hardware.</li>
+    <li><strong>Not affiliated with Spiral Blue.</strong> It is an independent demo, not endorsed or tested by them.</li>
+    <li><strong>False alarms are an upper bound.</strong> They are measured on plume-free reference pairs from known super-emitter sites, which may hold real, unlabelled plumes. Chips are centred on known emitters; arbitrary scenes would see more false alarms.</li>
+    <li><strong>INT8 may wash out the signal.</strong> The methane signal is about 1&nbsp;% of reflectance. Any INT8 engine must be validated against the ONNX model.</li>
+    <li><strong>The selection rule changed after test numbers were seen.</strong> Release selection moved from validation IoU to validation false-alarm rate, which favours <code>fr_neg</code>. Its test numbers are therefore not a clean held-out estimate.</li>
+    <li><strong>Non-commercial.</strong> Training data is MethaneSET under CC&nbsp;BY-NC-SA&nbsp;4.0, so the weights are too.</li>
+  </ul>
+  <p class="note">The full-resolution Hugging Face card currently releases <code>fr_base</code> at threshold 0.7. A swap to <code>fr_neg</code> at 0.5 is pending.</p>
+</section>
+
+<section id="links" class="block reveal">
+  <p class="eyebrow">Links</p>
+  <h2>Look closer.</h2>
+  <ul class="links">
+    <li><a href="https://github.com/grok-sibot/methane-plume-se2"><span>Source code</span><small>github.com/grok-sibot/methane-plume-se2</small></a></li>
+    <li><a href="https://huggingface.co/sighmon/methane-plume-se2-fullres"><span>Full-resolution model</span><small>huggingface.co/sighmon/methane-plume-se2-fullres</small></a></li>
+    <li><a href="https://huggingface.co/sighmon/methane-plume-se2"><span>20 m CPU model</span><small>huggingface.co/sighmon/methane-plume-se2</small></a></li>
+    <li><a href="https://huggingface.co/spaces/sighmon/methane-se2-fullres-trackio"><span>Full-res training dashboard</span><small>Trackio</small></a></li>
+    <li><a href="https://huggingface.co/spaces/sighmon/methane-se2-trackio"><span>CPU training dashboard</span><small>Trackio</small></a></li>
+    <li><a href="https://huggingface.co/datasets/tacofoundation/methaneset"><span>MethaneSET dataset</span><small>CC BY-NC-SA 4.0</small></a></li>
+  </ul>
+</section>
+</main>
+
+<footer class="foot">
+  <p>Built by <a href="https://sighmon.com">Simon Loffler</a>. Sentinel-2 data via MethaneSET. Demo only, not a validated monitoring product.</p>
+</footer>
+
+<script>
+(function () {
+  var els = document.querySelectorAll('.reveal');
+  if (!('IntersectionObserver' in window) || matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    els.forEach(function (e) { e.classList.add('in'); }); return;
+  }
+  document.documentElement.classList.add('js');
+  var io = new IntersectionObserver(function (entries) {
+    entries.forEach(function (en) { if (en.isIntersecting) { en.target.classList.add('in'); io.unobserve(en.target); } });
+  }, { rootMargin: '0px 0px -10% 0px' });
+  els.forEach(function (e) { io.observe(e); });
+})();
+</script>
+</body>
+</html>
