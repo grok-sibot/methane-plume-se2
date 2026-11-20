@@ -1,0 +1,12 @@
+{
+ "params": 4133819,
+ "onnx_bytes": 16532096,
+ "onnx_max_abs_diff_logits": 0.00010037422180175781,
+ "onnx_mask_agreement": 1.0,
+ "gmacs": 0.357548832,
+ "torch_cpu_ms_1t": 11.036442659969907,
+ "ort_cpu_ms_1t": 5.082238140021218,
+ "torch_cpu_ms_8t": 10.45044588005112,
+ "ort_cpu_ms_8t": 2.7951976400072454,
+ "cpu": "Model name:                              Intel(R) Xeon(R) Processor"
+}

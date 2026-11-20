@@ -1,0 +1,10 @@
+venv/
+data/
+runs/
+trackio/
+*.pt
+*.npy
+*.onnx
+*.safetensors
+__pycache__/
+.ipynb_checkpoints/

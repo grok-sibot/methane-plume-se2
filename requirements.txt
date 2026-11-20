@@ -1,0 +1,6 @@
+torch>=2.2
+segmentation-models-pytorch==0.6.0
+onnxruntime
+rasterio
+numpy
+safetensors
