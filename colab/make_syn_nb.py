@@ -329,7 +329,7 @@ TRAIN_TIMES = {}
 for name in RUNS_TO_TRAIN:
     t = time.time()
     sp.train_syn(name, 'mbmp' if name.endswith('mbmp') else 'plain', XFT, meta, CH4, XP, TR_PAIRS, ASSIGN, CANVAS, CAN_SRC, EDGE, PMETA,
-                 TM.to(DEV), DEV, RUNS, init_sd=SD0, XV=XV, val_neg=VAL_NEG, epochs=EPOCHS, lr=LR, bs_real=BS_REAL, bs_syn=BS_SYN,
+                 TM, DEV, RUNS, init_sd=SD0, XV=XV, val_neg=VAL_NEG, epochs=EPOCHS, lr=LR, bs_real=BS_REAL, bs_syn=BS_SYN,
                  inj_p=INJ_P, neg_p=NEG_P, q_min=Q_MIN, q_max=Q_MAX, floor_sigma=FLOOR, enh_weighting=ENH_WEIGHTING, amp=AMP,
                  workers=WORKERS, project=TRACKIO_PROJECT, skip_done=SKIP_DONE, max_steps=MAX_STEPS, preview_every=1 if SMOKE_TEST else 3)
     TRAIN_TIMES[name] = time.time() - t

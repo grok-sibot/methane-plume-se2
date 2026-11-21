@@ -234,10 +234,17 @@ class Transmittance:
         self.Tbg = {b: torch.stack([torch.tensor(np.ravel(d[s][f'transmittance_{b}_bg']), dtype=torch.float32)
                                     for s in SENSORS]) for b in ('b11', 'b12')}          # (3,8)
         self.with_ltoa = d.get('with_ltoa_correction')
+        self._cache = {}
     def to(self, dev):
-        self.amf, self.mr = self.amf.to(dev), self.mr.to(dev)
-        self.T = {k: v.to(dev) for k, v in self.T.items()}; self.Tbg = {k: v.to(dev) for k, v in self.Tbg.items()}
+        """Kept for older notebooks. The master tables stay on the CPU; every call uses a copy on the device of its
+        inputs (see _on), so the same object serves CPU and GPU callers."""
         return self
+    def _on(self, dev):
+        """(amf, mr, T) on `dev`, copied once per device and cached."""
+        k = str(dev)
+        if k not in self._cache:
+            self._cache[k] = (self.amf.to(dev), self.mr.to(dev), {b: v.to(dev) for b, v in self.T.items()})
+        return self._cache[k]
     @staticmethod
     def _interp1(x, xp, fp, log_extrap=True):
         """Batched 1-D interpolation. x (B,N), xp (B,K) increasing, fp (B,K). Linear in ln f, linear extrapolation."""
@@ -247,15 +254,16 @@ class Transmittance:
         return torch.exp(y0 + (y1 - y0) * (x - x0) / (x1 - x0))
     def rows_at(self, sensor, amf):
         """Per-chip table rows at the chip's AMF (linear in AMF). sensor (B,) long, amf (B,). -> mr (B,9), T{b}: (B,9)."""
-        a = amf.clamp(float(self.amf[0]), float(self.amf[-1])); K = len(self.amf)
-        j = torch.searchsorted(self.amf.contiguous(), a.contiguous()).clamp(1, K - 1)
-        w = ((a - self.amf[j - 1]) / (self.amf[j] - self.amf[j - 1]))[:, None]
-        mr = self.mr[j - 1] * (1 - w) + self.mr[j] * w
-        T = {b: self.T[b][sensor, j - 1] * (1 - w) + self.T[b][sensor, j] * w for b in self.T}
+        A, MR, TT = self._on(amf.device); sensor = sensor.to(amf.device).long()
+        a = amf.float().clamp(float(self.amf[0]), float(self.amf[-1])); K = len(self.amf)
+        j = torch.searchsorted(A.contiguous(), a.contiguous()).clamp(1, K - 1)
+        w = ((a - A[j - 1]) / (A[j] - A[j - 1]))[:, None]
+        mr = MR[j - 1] * (1 - w) + MR[j] * w
+        T = {b: TT[b][sensor, j - 1] * (1 - w) + TT[b][sensor, j] * w for b in TT}
         return mr, T
     def rel(self, sensor, amf, delta):
         """T(1800 + delta) / T(1800) for B11 and B12. delta (B,N) ppb >= 0. -> (rel11, rel12) each (B,N)."""
-        mr, T = self.rows_at(sensor, amf); B = delta.shape[0]
+        amf = amf.to(delta.device); mr, T = self.rows_at(sensor, amf); B = delta.shape[0]
         out = []
         for b in ('b11', 'b12'):
             t = self._interp1(BG_PPB + delta, mr, T[b]); t0 = self._interp1(torch.full((B, 1), BG_PPB, device=delta.device), mr, T[b])
