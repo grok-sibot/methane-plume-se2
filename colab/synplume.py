@@ -51,6 +51,8 @@ class LeafReader:
             with self.lock: self.loc[k] = u
         return self.loc[k]
     def read(self, sub, f, off, size):
+        if not isinstance(f, str) or not f.endswith('.tacozip'):
+            raise TypeError(f'leaf file name must be a .tacozip str, got {type(f).__name__}: {str(f)[:80]!r}')
         off, size = int(off), int(size)
         p = self._local(sub, f)
         if p:
@@ -75,9 +77,26 @@ def decode(b, bands=None):
         return d.read([i + 1 for i in bands] if bands is not None else None).astype(np.float32)
 
 def leaf_index(l1):
-    """(folder id, leaf id) -> row of level1 (offset, size, source_file)."""
-    l1 = l1.copy(); l1['_pid'] = l1['internal:relative_path'].str.split('/').str[0]
-    return l1.set_index(['_pid', 'id'])[['internal:offset', 'internal:size', 'internal:source_file']]
+    """(folder id, leaf id) -> (offset, size, source_file) as plain Python int/int/str, in a dict.
+    Built once, single-threaded. Worker threads only read the dict. (Concurrent DataFrame.loc lookups on an unsorted
+    MultiIndex are not thread-safe in pandas 2.2, the Colab version: a few of them return a one-row DataFrame, so the
+    "file name" became a pandas Series and the range read failed.) Duplicate keys are counted: identical duplicates
+    keep the first row, conflicting duplicates raise."""
+    pid = l1['internal:relative_path'].str.split('/').str[0].values
+    lid = l1['id'].astype(str).values
+    off = l1['internal:offset'].astype('int64').values; size = l1['internal:size'].astype('int64').values
+    src = l1['internal:source_file'].astype(str).values
+    out, ndup, conflict = {}, 0, []
+    for k in zip(pid, lid, off, size, src):
+        key, val = (str(k[0]), str(k[1])), (int(k[2]), int(k[3]), str(k[4]))
+        if key in out:
+            ndup += 1
+            if out[key] != val: conflict.append((key, out[key], val))
+            continue
+        out[key] = val
+    if ndup: print(f'leaf_index: {ndup} duplicate (folder, leaf) rows, {len(conflict)} conflicting')
+    if conflict: raise ValueError(f'conflicting duplicate leaves, e.g. {conflict[:3]}')
+    return out
 
 def _parallel(fn, n, workers, label, every=500):
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -98,14 +117,14 @@ def build_pair_cache(rows, L1, sub, out_npy, reader, workers=64):
     X = np.lib.format.open_memmap(tmp, 'r+' if os.path.exists(tmp) and os.path.exists(dn) else 'w+', np.float16, (N, 8, 200, 200))
     done = np.load(dn) if os.path.exists(dn) else np.zeros(N, bool)
     bad = np.load(bad_p) if os.path.exists(bad_p) else np.zeros(N, bool)
-    todo = np.where(~done)[0]; ids = rows['id'].values; lock = threading.Lock(); cnt = [0]
+    todo = np.where(~done)[0]; ids = [str(v) for v in rows['id'].values]; lock = threading.Lock(); cnt = [0]
     print(f'pair cache {out_npy}: {N} pairs, {len(todo)} to fetch')
     def work(k):
         i = int(todo[k])
         try:
-            t = L1.loc[(ids[i], 'target')]; r = L1.loc[(ids[i], 'reference')]
-            a = decode(reader.read(sub, t['internal:source_file'], t['internal:offset'], t['internal:size']), BANDS0)
-            b = decode(reader.read(sub, r['internal:source_file'], r['internal:offset'], r['internal:size']), BANDS0[4:6])
+            to, ts, tf = L1[(ids[i], 'target')]; ro, rs, rf = L1[(ids[i], 'reference')]
+            a = decode(reader.read(sub, tf, to, ts), BANDS0)
+            b = decode(reader.read(sub, rf, ro, rs), BANDS0[4:6])
             assert a.shape == (6, 200, 200) and b.shape == (2, 200, 200)
             X[i] = np.concatenate([a, b]) / 10000.0
         except Exception as e:
@@ -121,13 +140,28 @@ def build_pair_cache(rows, L1, sub, out_npy, reader, workers=64):
     return np.load(out_npy, mmap_mode='r'), bad
 
 def build_leaf_cache(l0, L1, leaf, sub, out_npy, reader, workers=32, band=1):
-    """One single-band leaf per fine-tune sample (e.g. the MBMP `ch4` leaf) -> (N,200,200) float32."""
+    """One single-band leaf per fine-tune sample (e.g. the MBMP `ch4` leaf) -> (N,200,200) float32.
+    Resumable like the pair caches: a .done.npy sidecar marks finished rows. A partial .tmp without a sidecar (left by
+    an older version) is discarded and rebuilt. Every key is checked before any read starts."""
     if os.path.exists(out_npy): return np.load(out_npy, mmap_mode='r')
-    N = len(l0); W = np.lib.format.open_memmap(out_npy + '.tmp', 'w+', np.float32, (N, 200, 200)); ids = l0['id'].values
-    def work(i):
-        r = L1.loc[(ids[i], leaf)]
-        W[i] = decode(reader.read(sub, r['internal:source_file'], r['internal:offset'], r['internal:size']), [band - 1])[0]
-    s = _parallel(work, N, workers, leaf, 1000); W.flush(); del W; os.replace(out_npy + '.tmp', out_npy)
+    N = len(l0); ids = [str(v) for v in l0['id'].values]; tmp = out_npy + '.tmp'; dn = out_npy + '.done.npy'
+    missing = [i for i in ids if (i, leaf) not in L1]
+    if missing: raise KeyError(f'{len(missing)} samples have no {leaf!r} leaf, e.g. {missing[:3]}')
+    resume = os.path.exists(tmp) and os.path.exists(dn)
+    W = np.lib.format.open_memmap(tmp, 'r+' if resume else 'w+', np.float32, (N, 200, 200))
+    done = np.load(dn) if resume else np.zeros(N, bool); todo = np.where(~done)[0]; lock = threading.Lock(); cnt = [0]
+    print(f'{leaf} cache {out_npy}: {N} samples, {len(todo)} to read' + (' (resuming)' if resume else ''))
+    def work(k):
+        i = int(todo[k]); o, sz, f = L1[(ids[i], leaf)]
+        W[i] = decode(reader.read(sub, f, o, sz), [band - 1])[0]
+        with lock:
+            done[i] = True; cnt[0] += 1
+            if cnt[0] % 500 == 0: W.flush(); np.save(dn, done)
+    try:
+        s = _parallel(work, len(todo), workers, leaf, 1000)
+    finally:
+        W.flush(); np.save(dn, done)
+    del W; os.replace(tmp, out_npy); os.remove(dn)
     print(f'  {leaf} cache done in {s:.0f}s'); return np.load(out_npy, mmap_mode='r')
 
 # ---------------------------------------------------------------------------------------------- bank
@@ -162,12 +196,14 @@ def build_bank_cache(bank_rows, out_npy, reader, sub='methaneset-bank', workers=
     if os.path.exists(out_npy) and os.path.exists(meta_p):
         z = np.load(meta_p); return np.load(out_npy, mmap_mode='r'), z['src'], z['lost']
     M = len(bank_rows); C = np.lib.format.open_memmap(out_npy + '.tmp', 'w+', np.float16, (M, CANVAS_H, CANVAS_W))
-    src = np.zeros((M, 2), np.float32); lost = np.zeros(M, np.float32); R = bank_rows.reset_index(drop=True)
+    src = np.zeros((M, 2), np.float32); lost = np.zeros(M, np.float32)
+    R = [dict(f=str(a), o=int(b), s=int(c), sr=float(d), sc=float(e)) for a, b, c, d, e in zip(  # plain values: no pandas in threads
+        bank_rows['internal:source_file'], bank_rows['internal:offset'], bank_rows['internal:size'], bank_rows['array:source_row'], bank_rows['array:source_col'])]
     def work(i):
-        r = R.iloc[i]
-        a = decode(reader.read(sub, r['internal:source_file'], r['internal:offset'], r['internal:size']))[0]
+        r = R[i]
+        a = decode(reader.read(sub, r['f'], r['o'], r['s']))[0]
         a = np.nan_to_num(a, nan=0.0)
-        sr, sc = float(r['array:source_row']), float(r['array:source_col'])
+        sr, sc = r['sr'], r['sc']
         r0, c0 = int(np.floor(CAN_R - sr)), int(np.floor(CAN_C - sc))
         src[i] = (sr + r0, sc + c0)
         H, W = a.shape; rr0, cc0 = max(r0, 0), max(c0, 0); rr1, cc1 = min(r0 + H, CANVAS_H), min(c0 + W, CANVAS_W)
