@@ -1,4 +1,4 @@
-# Plan: synthetic-plume training run (Colab T4), not yet run
+# Plan: synthetic-plume training run (Colab T4), notebook built, not yet run on a GPU
 
 Goal: raise detection on **unseen sites** and measure false alarms on **real plume-free scenes**, without changing the onboard
 input contract (`reflectance` 1×8×200×200, 10 m). Motivation: MARS-S2L (arXiv 2511.21777v3) reports that injecting simulated
@@ -76,3 +76,30 @@ site name and emission point, not trusted.
 
 **No-go** (keep `fr_neg`, write up the result) if the injection sanity gate fails, if gains appear only on synthetic data, or if
 real-scene FA gets worse at matched detection.
+
+## Update 21 Nov 2026: notebook built (`synthetic_plumes_colab.ipynb`, generator `make_syn_nb.py`, code `synplume.py`)
+
+Smoke-tested end to end on CPU. Not yet run on a GPU, so there are no results yet. What changed from the plan, and what was checked:
+
+- **FA set counts.** 8,740 is right for 2024 pairs at sites in neither fine-tune train nor pretraining train. Only **1,307** of them are at
+  unseen-test sites (`real2024_strict_unseen`). The 3,066 figure above is *all* 2024 pairs at unseen-test sites. 46 of those sites also
+  occur in pretraining train, but our training drops every unseen-site pair, so the notebook reports all 3,066 separately (`real2024_unseen_all`).
+- **Transmittance units.** B11 is a plain transmittance (~0.99). B12 is tabulated on a ~64 scale: its `_bg` column is the constant 64.2987,
+  and the 1,800 ppb interpolation matches it at every AMF for every sensor to within 6e-5. The injection uses T(1800 + Δ) / T(1800) at
+  the scene AMF, so the scale cancels. At AMF 2.3, +1,000 ppb gives −2.4 % in B12 and −0.39 % in B11.
+- **Sun geometry.** `target:raa` equals (90° − SAA) − wind direction to within 6e-14° in every pair (the bank's convention, MethaneSET v1.2.0+).
+  All 279 bank plumes share the same 855 sun positions.
+- **Label floor.** The floor is not a fixed 2× noise: that would leave almost no label (median 17 px at 2σ against a real median of
+  836 px). It is picked by the gate so that synthetic label areas match real ones (`LABEL_FLOOR_SIGMA = 'auto'`).
+- **Gate check on the box** (128 pretraining train scenes at 3 t/h against 160 real fine-tune train plumes of 2–4.5 t/h; see
+  `syn_checks/`): it passed. Every ratio below is synthetic/real:
+  - ln(B12/B11) enhancement 0.69;
+  - MBMP enhancement 0.69;
+  - label area 1.31 at a 0.25σ floor;
+  - 94 % of injected chips show a B12/B11 dip, against 99 % of real chips.
+  Scene noise is a median of 348 ppb per 10 m pixel.
+- **MBMP run.** It adds 290 parameters (+0.007 %). Criterion 4 is checked as "within 0.01 %".
+- **Consistency.** Under the new scoring code, `fr_neg` reproduces its card numbers exactly: IoU 0.521 on all 1,050 test chips, 0.543 on
+  seen and 0.435 on unseen.
+- **Cost.** About 38 GB of disk and 40–70 min on a standard T4; see the notebook's first cell. The pair caches use range reads,
+  measured at 25–58 pairs/s with 2 CPUs.

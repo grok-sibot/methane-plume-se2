@@ -1,0 +1,77 @@
+{
+ "units": {
+  "max_rel_err_T1800_vs_bg": 6.253142055356875e-05,
+  "with_ltoa_correction": true,
+  "b12_rel_change_per_1000ppb_amf2p3": -0.024066269397735596,
+  "b11_rel_change_per_1000ppb_amf2p3": -0.003912746906280518,
+  "b12_table_scale": 64.2987289428711,
+  "note": "B12 table ~64 scale cancels in T(1800+d)/T(1800)"
+ },
+ "real": {
+  "n": 160,
+  "flux_kgh_median": 3098.1454999999996
+ },
+ "label_floor": {
+  "chosen_sigma": 0.25,
+  "mode": "auto",
+  "median_area_px_by_sigma": {
+   "0.25": 1096.0,
+   "0.5": 482.0,
+   "0.75": 244.5,
+   "1.0": 126.5,
+   "1.5": 42.5,
+   "2.0": 17.0
+  },
+  "real_median_area_px": 836.0
+ },
+ "synthetic": {
+  "n": 128,
+  "Q_kgh": 3000.0,
+  "noise_ppb_median": 348.377197265625,
+  "noise_ppb_iqr": [
+   274.9095458984375,
+   539.5059814453125
+  ],
+  "floor_ppb_median": 87.09429931640625,
+  "peak_delta_ppb_median": 1144.7760009765625,
+  "empty_label_frac": 0.0078125,
+  "true_dip_ratio_median": -0.003905404591932893
+ },
+ "ratio_enhancement": {
+  "real_median": -0.0050861164927482605,
+  "real_iqr": [
+   -0.008009440265595913,
+   -0.003417811472900212
+  ],
+  "syn_median": -0.0035337843000888824,
+  "syn_iqr": [
+   -0.006263587158173323,
+   -0.002279187086969614
+  ],
+  "syn_over_real": 0.6947902796027815,
+  "syn_negative_frac": 0.9375,
+  "real_negative_frac": 0.9875
+ },
+ "mbmp_enhancement": {
+  "real_median": -0.005150949349626899,
+  "real_iqr": [
+   -0.007905518868938088,
+   -0.0034534826409071684
+  ],
+  "syn_median": -0.00354590080678463,
+  "syn_iqr": [
+   -0.006263176212087274,
+   -0.002282816218212247
+  ],
+  "syn_over_real": 0.6883975294848262,
+  "syn_negative_frac": 0.9296875,
+  "real_negative_frac": 0.9875
+ },
+ "area": {
+  "real_median_px": 836.0,
+  "syn_median_px": 1096.0,
+  "syn_over_real": 1.3106332138590202
+ },
+ "ok": true,
+ "why": []
+}
