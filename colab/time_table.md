@@ -13,3 +13,5 @@
 | **total** | **~38 GB disk** | | **≈ 40–70 min; budget 1.5 h** |
 
 RAM: every cache is memory-mapped, so 12.7 GB is enough (the CPU test kernel peaked at 5.2 GB RSS, mostly reclaimable mapped pages). High-RAM only makes the reads faster because more of the caches stay in the page cache. With `PRETRAIN_N = 6000` and `VAL_FA_N = 1000` the caches shrink by ~4.5 GB and the run by ~5 min.
+
+**Measured on Colab T4 in round 1 (21 Nov 2026), with the fine-tune cache already in the runtime:** pair caches 19.3 min for 24,499 pairs (15.7 GB downloaded), bank 1.4 min, gate 3 s, training 11.4 min (`syn`) and 11.1 min (`syn_mbmp`) for 12 epochs, evaluation 3.9 min. Round 2's estimates are in `time_table_r2.md`.

@@ -1,11 +1,12 @@
 """Run the synthetic-plume notebook's smoke test on a CPU box with the fake-GPU device checker (devcheck.py) active
 from the setup cell on, so every section runs with DEV = a pretend CUDA device and any CPU/GPU tensor mix raises.
-usage: python run_smoke_devcheck.py OUT_DIR [--module path/to/synplume.py] [--amp-bf16] [extra papermill -p k v ...]
+usage: python run_smoke_devcheck.py OUT_DIR [--notebook NB.ipynb] [--module path/to/synplume.py] [--amp-bf16] [extra papermill -p k v ...]
 --amp-bf16 also forces mf.amp_dtype_for to bfloat16 so the autocast branches (CUDA-only otherwise) run too."""
 import sys, os, json, subprocess, nbformat as nbf
 HERE = os.path.dirname(os.path.abspath(__file__)); NB = os.path.join(os.path.dirname(HERE), 'synthetic_plumes_colab.ipynb')
 out = os.path.abspath(sys.argv[1]); args = sys.argv[2:]; os.makedirs(out, exist_ok=True)
 module = None
+if '--notebook' in args: i = args.index('--notebook'); NB = os.path.abspath(args[i + 1]); del args[i:i + 2]
 if '--module' in args: i = args.index('--module'); module = args[i + 1]; del args[i:i + 2]
 nb = nbf.read(NB, as_version=4)
 setup = next(i for i, c in enumerate(nb.cells) if c.cell_type == 'code' and "DEV = torch.device('cuda'" in c.source)

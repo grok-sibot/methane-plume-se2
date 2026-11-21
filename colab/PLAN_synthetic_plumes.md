@@ -103,3 +103,33 @@ Smoke-tested end to end on CPU. Not yet run on a GPU, so there are no results ye
   seen and 0.435 on unseen.
 - **Cost.** About 38 GB of disk and 40–70 min on a standard T4; see the notebook's first cell. The pair caches use range reads,
   measured at 25–58 pairs/s with 2 CPUs.
+
+## Round 1 result (Colab T4, 21 Nov 2026): NO-GO
+
+`syn` (12 epochs, 12,000 plume-free pairs, `INJ_P` 0.7, `NEG_P` 0.3) against `fr_neg`:
+- unseen-site hit rate at 5 % real FA: 0.438 against 0.402. That is +0.036, and the rule needs +0.10;
+- AP: 0.614 against 0.523 on all plumes, and 0.246 against 0.192 on unseen-site plumes;
+- hit rate at 1 % real FA: 0.343 against 0.204 on all plumes;
+- at 0.5: false alarms on the test chips' bg1-vs-bg0 pairs got worse (0.68 against 0.55), and seen IoU went from 0.543 to 0.536;
+- `syn_mbmp` was no better.
+
+So the injection helps the ranking (AP, low-FA operating points) but not enough at unseen sites, and 0.5 is not a useful operating point.
+
+## Round 2 (`synthetic_plumes_r2_colab.ipynb`, generator `make_syn_r2_nb.py`; round 1 left as it was)
+
+- **Variants.** `syn_mbmp` is dropped. Up to three variants are trained:
+  - `syn2`: the round-1 recipe;
+  - `syn2_neg`: `INJ_P` 0.5 and `NEG_P` 0.5, so more clean and real negatives;
+  - `syn2_hn`: `syn2_neg` plus hard negatives. The 10 % of training pairs that `fr_neg` scores highest are never injected and make up 25 % of the plume-free draws.
+
+  All three run 20 epochs and use every eligible pair. There are 24,918 at ≥ 95 % clear after dropping the unseen-test sites; 30k do not exist.
+- **Calibrated threshold.** Per model, the threshold giving 5 % FA on the 2021 val plume-free pairs. Every test metric is also reported at it: pixel IoU/F1 for seen, unseen and all plumes, scene detect and hit rates, and the real 2024 FA it actually gives.
+- **Unseen-like sampling weights,** from training-split information only:
+  - novel site (no fine-tune train chip) ×2;
+  - count(site)^−½, count(country)^−½ and count(SWIR-albedo bin)^−½, with 10 equal-width bins;
+  - capped, then mixed 50/50 with uniform.
+
+  82 % of the eligible pool sits at fine-tune train sites. The weights are a heuristic, not a fitted density ratio. A post-training diagnostic compares the pools with the unseen test chips; it does not feed back.
+- **Rule.** Same as round 1, plus 2b: unseen IoU at each model's val-calibrated threshold must not drop by more than 0.01. It is written to `out/preregistered_rule.json` before any data is read.
+- **Robustness.** Disk is checked before each cache, source zips are deleted once used, and the training pool shrinks (and is recorded) if disk is short. A time budget skips the last variants rather than overrunning.
+- **Cost.** Estimated ≈ 1 h 50 min and a ~41 GB disk peak on a fresh T4 runtime. See `colab/time_table_r2.md`.

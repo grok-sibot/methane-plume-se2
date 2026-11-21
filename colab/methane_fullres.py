@@ -171,13 +171,14 @@ def dice_bce(logits, y):
 THRS = np.round(np.arange(0.05, 0.951, 0.05), 2)
 
 @torch.no_grad()
-def predict_counts(model, dl, dev, amp_dtype=None):
+def predict_counts(model, dl, dev, amp_dtype=None, thrs=None):
     """One pass over a split. For every threshold in THRS and for two grids
     ('10m' native, min 40 px = 0.4 ha; '20m' = 2x2 mean-pooled probabilities vs the CPU model's 20 m
     labels (pooled fraction >= 0.5), min 10 px = 0.4 ha) accumulate pixel tp/fp/fn, chip detections on
-    plume pairs and false alarms on plume-free pairs (bg1 vs bg0)."""
-    model.eval(); T = torch.tensor(THRS, device=dev, dtype=torch.float32)[:, None, None, None, None]
-    acc = {g: dict(tp=torch.zeros(len(THRS), device=dev, dtype=torch.float64), fp=None, fn=None, det=None, fa=None)
+    plume pairs and false alarms on plume-free pairs (bg1 vs bg0). thrs: optional threshold list (default THRS)."""
+    thrs = THRS if thrs is None else np.asarray(sorted(set(float(t) for t in thrs)), dtype=np.float64)
+    model.eval(); T = torch.tensor(thrs, device=dev, dtype=torch.float32)[:, None, None, None, None]
+    acc = {g: dict(tp=torch.zeros(len(thrs), device=dev, dtype=torch.float64), fp=None, fn=None, det=None, fa=None)
            for g in ('10m', '20m')}
     for g in acc:
         for k in ('fp', 'fn', 'det', 'fa'): acc[g][k] = torch.zeros_like(acc[g]['tp'])
@@ -202,10 +203,11 @@ def predict_counts(model, dl, dev, amp_dtype=None):
         P = A['tp'] / np.maximum(A['tp'] + A['fp'], 1); R = A['tp'] / np.maximum(A['tp'] + A['fn'], 1)
         out[g] = dict(iou=A['tp'] / np.maximum(A['tp'] + A['fp'] + A['fn'], 1), f1=2 * P * R / np.maximum(P + R, 1e-9),
                       precision=P, recall=R, det_rate=A['det'] / max(n, 1), false_alarm=A['fa'] / max(n, 1))
+    if thrs is not THRS: out['thrs'] = thrs
     return out
 
 def at(counts, thr, grid='10m'):
-    i = int(np.argmin(np.abs(THRS - thr))); return {k: float(v[i]) for k, v in counts[grid].items()}
+    t = counts.get('thrs', THRS); i = int(np.argmin(np.abs(t - thr))); return {k: float(v[i]) for k, v in counts[grid].items()}
 
 def pick_threshold(val_counts, metric='f1', grid='10m'):
     return float(THRS[int(np.argmax(val_counts[grid][metric]))])

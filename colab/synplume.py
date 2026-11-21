@@ -421,9 +421,11 @@ def weighted_dice_bce(logits, y, w, pos_weight=3.0):
 
 # ------------------------------------------------------------------------------------------- data
 class SynScenes(torch.utils.data.Dataset):
-    """Plume-free pretraining pairs + one of the scene's k assigned bank canvases (random each time)."""
-    def __init__(self, XP, idx, assign, canvas, meta_arr, seed=0):
+    """Plume-free pretraining pairs + one of the scene's k assigned bank canvases (random each time).
+    hard: optional bool per pair (indexed like XP); hard pairs are returned with flag True (kept clean in training)."""
+    def __init__(self, XP, idx, assign, canvas, meta_arr, seed=0, hard=None):
         self.XP, self.idx, self.assign, self.canvas, self.meta = XP, np.asarray(idx), assign, canvas, meta_arr
+        self.hard = np.zeros(len(XP), bool) if hard is None else np.asarray(hard, bool)
         self.seed = seed; self.rng = None
     def __len__(self): return len(self.idx)
     def __getitem__(self, i):
@@ -431,7 +433,17 @@ class SynScenes(torch.utils.data.Dataset):
             wi = torch.utils.data.get_worker_info(); self.rng = np.random.default_rng(self.seed + (wi.id + 1 if wi else 0) * 7919 + int(time.time()))
         j = int(self.idx[i]); b = int(self.assign[j, self.rng.integers(self.assign.shape[1])])
         return (torch.from_numpy(np.array(self.XP[j])), torch.from_numpy(np.array(self.canvas[b]))[None],
-                torch.from_numpy(self.meta[j]), b)
+                torch.from_numpy(self.meta[j]), b, bool(self.hard[j]))
+
+class WeightedStream(torch.utils.data.Sampler):
+    """Endless weighted sampling with replacement, drawn in chunks (WeightedRandomSampler would draw all
+    num_samples up front). weights: one per dataset position."""
+    def __init__(self, weights, generator, chunk=4096):
+        self.w = torch.as_tensor(np.asarray(weights, np.float64)); self.g = generator; self.chunk = chunk
+        assert len(self.w) and bool((self.w >= 0).all()) and float(self.w.sum()) > 0
+    def __len__(self): return 10 ** 8
+    def __iter__(self):
+        while True: yield from torch.multinomial(self.w, self.chunk, replacement=True, generator=self.g).tolist()
 
 def scene_meta(rows):
     """Per pretraining pair: sza, vza, theta (wind direction, rad ccw from east; NaN if calm), sensor index."""
@@ -509,11 +521,12 @@ def real_batch(a, rows, gen, cfg, meth, ch4, dev):
     else: E = torch.zeros_like(y)
     return x, y, E
 
-def syn_batch(xp, canv, pm, bidx, can_src, edge, tm, gen, inj_p, **kw):
+def syn_batch(xp, canv, pm, bidx, can_src, edge, tm, gen, inj_p, keep_clean=None, **kw):
     """Plume-free pairs: a fraction inj_p get an injected plume (label from the detectability floor), the rest stay
-    clean (label 0)."""
+    clean (label 0). keep_clean: optional bool (B,) on the same device; those pairs are never injected (hard negatives)."""
     x = xp.float(); B = x.shape[0]; dev = x.device
     inj = torch.rand(B, generator=gen, device=dev) < inj_p
+    if keep_clean is not None: inj = inj & ~keep_clean.to(dev).bool()
     y = torch.zeros(B, 1, *x.shape[2:], device=dev); E = torch.zeros_like(y); info = None
     if inj.any():
         k = inj.nonzero()[:, 0]
@@ -526,10 +539,12 @@ def train_syn(name, kind, Xft, meta_ft, ch4, XP, tr_pairs, assign, canvas, can_s
               init_sd, XV=None, val_neg=None, epochs=12, lr=3e-4, bs_real=8, bs_syn=8, inj_p=0.7, neg_p=0.3,
               q_min=500., q_max=20000., floor_sigma=0.5, enh_weighting=True, amp=True, workers=2, seed=0,
               project='methane-se2-syn', skip_done=True, log=print, channels_last=True, max_steps=None,
-              preview_every=3):
+              preview_every=3, pair_weights=None, hard=None, extra_cfg=None):
     """Mixed batches: bs_real real fine-tune chips + bs_syn plume-free pairs (inj_p of them with an injected plume).
     With the defaults (8 + 8, inj_p 0.7) that is 50 % real, 35 % injected, 15 % untouched, as in the plan.
-    One epoch = one pass over the real train chips. Keeps final.pt and best.pt (best val hit rate at 5 % val FA)."""
+    One epoch = one pass over the real train chips. Keeps final.pt and best.pt (best val hit rate at 5 % val FA).
+    pair_weights: optional sampling weight per entry of tr_pairs (default uniform). hard: optional bool per XP row;
+    hard pairs are never injected (hard negatives)."""
     import trackio
     import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt
     out = f'{out_root}/{name}'; os.makedirs(out, exist_ok=True)
@@ -537,7 +552,8 @@ def train_syn(name, kind, Xft, meta_ft, ch4, XP, tr_pairs, assign, canvas, can_s
         log(f'[{name}] final.pt exists, skipping (set SKIP_DONE=False to retrain)'); return out
     cfg = dict(name=name, kind=kind, epochs=epochs, lr=lr, bs_real=bs_real, bs_syn=bs_syn, inj_p=inj_p, neg_p=neg_p,
                q_min=q_min, q_max=q_max, floor_sigma=floor_sigma, enh_weighting=enh_weighting, seed=seed, amp=amp,
-               n_pretrain_pairs=len(tr_pairs), resolution='10m', chip=200)
+               n_pretrain_pairs=len(tr_pairs), resolution='10m', chip=200, weighted_sampling=pair_weights is not None,
+               n_hard=int(np.asarray(hard, bool)[np.asarray(tr_pairs)].sum()) if hard is not None else 0, **(extra_cfg or {}))
     torch.manual_seed(seed); np.random.seed(seed)
     gen = torch.Generator(device=dev); gen.manual_seed(seed)
     tr = np.where(meta_ft.split == 'train')[0]; va = np.where(meta_ft.split == 'validation')[0]
@@ -550,8 +566,9 @@ def train_syn(name, kind, Xft, meta_ft, ch4, XP, tr_pairs, assign, canvas, can_s
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     dl_r = mf.loader(Xft, tr, bs_real, True, workers, seed, drop_last=True)
     g = torch.Generator(); g.manual_seed(seed)
-    ds = SynScenes(XP, tr_pairs, assign, canvas, pmeta, seed)
-    sampler = torch.utils.data.RandomSampler(ds, replacement=True, num_samples=10 ** 8, generator=g)
+    ds = SynScenes(XP, tr_pairs, assign, canvas, pmeta, seed, hard=hard)
+    sampler = (torch.utils.data.RandomSampler(ds, replacement=True, num_samples=10 ** 8, generator=g) if pair_weights is None
+               else WeightedStream(pair_weights, g))
     dl_s = torch.utils.data.DataLoader(ds, batch_size=bs_syn, sampler=sampler, num_workers=workers,
                                        pin_memory=dev.type == 'cuda', persistent_workers=workers > 0, drop_last=True)
     it_s = iter(dl_s)
@@ -573,14 +590,16 @@ def train_syn(name, kind, Xft, meta_ft, ch4, XP, tr_pairs, assign, canvas, can_s
         f.suptitle(f'{name} ep {ep}: synthetic chips. ln(B12/B11) target-ref / label / prediction', fontsize=9); f.tight_layout()
         fn = f'{out}/syn_preview_ep{ep:03d}.png'; f.savefig(fn, dpi=70); plt.close(f); return fn
     for ep in range(1, epochs + 1):
-        model.train(); t0 = time.time(); ls = []; qs = []; noise = []; lab_px = []; xb_last = yb_last = None
+        model.train(); t0 = time.time(); ls = []; qs = []; noise = []; lab_px = []; xb_last = yb_last = None; n_hard = n_syn = 0
         for step, (a, rows) in enumerate(dl_r):
             if step >= spe: break
             a = a.to(dev, non_blocking=True); rows = rows.to(dev)
             xr, yr, Er = real_batch(a, rows, gen, dict(neg_p=neg_p), meth, ch4 if enh_weighting else None, dev)
-            xp_, cv, pm, bidx = next(it_s)
+            xp_, cv, pm, bidx, hd = next(it_s)
             xs, ys, Es, inj, info = syn_batch(xp_.to(dev, non_blocking=True), cv.to(dev, non_blocking=True), pm.to(dev),
-                                              bidx.to(dev), can_src_t, edge_t, tm, gen, inj_p, **kw)
+                                              bidx.to(dev), can_src_t, edge_t, tm, gen, inj_p,
+                                              keep_clean=hd.to(dev) if hard is not None else None, **kw)
+            n_hard += int(hd.sum()); n_syn += len(hd)
             if info is not None:
                 qs += info['Q'].tolist(); noise += info['noise_ppb'].tolist(); lab_px += ys[inj].flatten(1).sum(1).tolist()
             x = torch.cat([xr, xs]); y = torch.cat([yr, ys]); E = torch.cat([Er, Es])
@@ -596,7 +615,8 @@ def train_syn(name, kind, Xft, meta_ft, ch4, XP, tr_pairs, assign, canvas, can_s
                    syn_Q_median_kgh=float(np.median(qs)) if qs else float('nan'),
                    syn_noise_ppb_median=float(np.median(noise)) if noise else float('nan'),
                    syn_label_px_median=float(np.median(lab_px)) if lab_px else float('nan'),
-                   syn_label_empty_frac=float(np.mean(np.array(lab_px) == 0)) if lab_px else float('nan'))
+                   syn_label_empty_frac=float(np.mean(np.array(lab_px) == 0)) if lab_px else float('nan'),
+                   syn_hard_frac=n_hard / max(n_syn, 1))
         c = mf.predict_counts(model, dv, dev, amp_dtype)
         for gname in ('10m', '20m'):
             rec.update({f'val{"" if gname == "10m" else "20"}/{k}': v for k, v in mf.at(c, 0.5, gname).items()})
@@ -625,14 +645,32 @@ def train_syn(name, kind, Xft, meta_ft, ch4, XP, tr_pairs, assign, canvas, can_s
 def load_model(kind, sd, dev):
     m = make_model(kind); m.load_state_dict(sd); return m.to(dev).eval()
 
-def evaluate(name, model, Xft, subsets, XF, fa_sets, XV, val_neg, va_idx, dev, amp_dtype=None, workers=2):
+def evaluate(name, model, Xft, subsets, XF, fa_sets, XV, val_neg, va_idx, dev, amp_dtype=None, workers=2, cal_fa=None):
     """subsets: {'all'|'seen'|'unseen': fine-tune test indices}; fa_sets: {name: indices into XF}.
-    Returns (summary dict, raw score arrays for plots)."""
+    cal_fa (e.g. 0.05): also calibrate an operating threshold on the 2021 val plume-free pairs (the threshold where the val
+    false-alarm rate is cal_fa) and report every test metric at it: pixel IoU/F1 per subset, scene detect / hit rates and
+    the real 2024 false-alarm rate it actually gives (res['calibrated']). Returns (summary dict, raw score arrays)."""
     res = dict(model=name, pixel={}, scene={}, val={}); raw = dict(pos={}, neg={})
+    have_val = XV is not None and val_neg is not None and len(val_neg) and len(va_idx)
+    t_cal = None
+    if have_val:   # val first: the calibrated threshold must exist before the test passes
+        pos = scene_scores(model, Xft, va_idx, dev, amp_dtype, kind='plumes'); neg = scene_scores(model, XV, val_neg, dev, amp_dtype)['score']
+        if cal_fa: t_cal = thr_at_fa(neg, cal_fa)
+        kw = dict(thrs=list(mf.THRS) + [t_cal]) if t_cal is not None else {}   # older methane_fullres.py has no thrs argument
+        c = mf.predict_counts(model, mf.loader(Xft, va_idx, 32, False, workers), dev, amp_dtype, **kw)
+        res['val'] = dict(AP=average_precision(pos['score'], neg)[0], ops=operating_points(pos, neg), n_pos=int(len(va_idx)),
+                          n_neg=int(len(neg)), pixel={g: mf.at(c, 0.5, g) for g in ('10m', '20m')})
+        raw['val'] = dict(pos=pos, neg=neg)
+        if t_cal is not None:
+            res['calibrated'] = dict(val_fa_target=float(cal_fa), threshold=float(t_cal), pixel={}, scene={},
+                                     val=dict(real_fa=float((neg >= t_cal).mean()), detect=float((pos['score'] >= t_cal).mean()),
+                                              hit=float((pos['score_in'] >= t_cal).mean()), pixel={g: mf.at(c, t_cal, g) for g in ('10m', '20m')}))
+    kw = dict(thrs=list(mf.THRS) + [t_cal]) if t_cal is not None else {}
     for sub, idx in subsets.items():
         if len(idx) == 0: continue
-        c = mf.predict_counts(model, mf.loader(Xft, idx, 32, False, workers), dev, amp_dtype)
+        c = mf.predict_counts(model, mf.loader(Xft, idx, 32, False, workers), dev, amp_dtype, **kw)
         res['pixel'][sub] = {g: mf.at(c, 0.5, g) for g in ('10m', '20m')}; res['pixel'][sub]['n'] = int(len(idx))
+        if t_cal is not None: res['calibrated']['pixel'][sub] = {g: mf.at(c, t_cal, g) for g in ('10m', '20m')}
         raw['pos'][sub] = scene_scores(model, Xft, idx, dev, amp_dtype, kind='plumes')
     for fs, idx in fa_sets.items():
         raw['neg'][fs] = scene_scores(model, XF, idx, dev, amp_dtype)['score'] if len(idx) else np.zeros(0)
@@ -645,16 +683,15 @@ def evaluate(name, model, Xft, subsets, XF, fa_sets, XV, val_neg, va_idx, dev, a
                                                detect_at_0p5=float((pos['score'] >= 0.5).mean()),
                                                hit_at_0p5=float((pos['score_in'] >= 0.5).mean()),
                                                ops=operating_points(pos, neg))
-    if XV is not None and val_neg is not None and len(val_neg) and len(va_idx):
-        pos = scene_scores(model, Xft, va_idx, dev, amp_dtype, kind='plumes'); neg = scene_scores(model, XV, val_neg, dev, amp_dtype)['score']
-        c = mf.predict_counts(model, mf.loader(Xft, va_idx, 32, False, workers), dev, amp_dtype)
-        res['val'] = dict(AP=average_precision(pos['score'], neg)[0], ops=operating_points(pos, neg), n_pos=int(len(va_idx)),
-                          n_neg=int(len(neg)), pixel={g: mf.at(c, 0.5, g) for g in ('10m', '20m')})
-        raw['val'] = dict(pos=pos, neg=neg)
+            if t_cal is not None:
+                res['calibrated']['scene'][f'{sub}|{fs}'] = dict(real_fa=float((neg >= t_cal).mean()), detect=float((pos['score'] >= t_cal).mean()),
+                                                                 hit=float((pos['score_in'] >= t_cal).mean()))
     return res, raw
 
-def go_no_go(cand, base, lat_ratio, contract_ok, params_cand, params_base, fa_key='8740', sub_unseen='unseen'):
-    """The plan's release rule, evaluated on the val-selected candidate only."""
+def go_no_go(cand, base, lat_ratio, contract_ok, params_cand, params_base, fa_key='8740', sub_unseen='unseen', calibrated=False):
+    """The plan's release rule, evaluated on the val-selected candidate only. calibrated=True adds criterion 2b: the same
+    IoU rule with each model at its own val-calibrated threshold (evaluate(..., cal_fa=...)), so a candidate that would
+    ship with a calibrated threshold is judged there too."""
     def g(r, sub, fs, op, k): return r['scene'].get(f'{sub}|{fs}', {}).get('ops', {}).get(op, {}).get(k, float('nan'))
     d_hit = g(cand, sub_unseen, fa_key, '5%', 'hit') - g(base, sub_unseen, fa_key, '5%', 'hit')
     d_iou = cand['pixel'].get(sub_unseen, {}).get('20m', {}).get('iou', float('nan')) - base['pixel'].get(sub_unseen, {}).get('20m', {}).get('iou', float('nan'))
@@ -670,6 +707,12 @@ def go_no_go(cand, base, lat_ratio, contract_ok, params_cand, params_base, fa_ke
         '4c CPU latency within 10 %': (lat_ratio, bool(np.isfinite(lat_ratio) and lat_ratio <= 1.10)),
         '5 no worse at matched detection on all test plumes (hit rate at real FA 5% not lower)': (d_all, bool(d_all >= 0)),
     }
+    if calibrated:
+        ci = lambda r: r.get('calibrated', {}).get('pixel', {}).get(sub_unseen, {}).get('20m', {}).get('iou', float('nan'))
+        d_cal = ci(cand) - ci(base)
+        ks = list(crit); i = ks.index(next(k for k in ks if k.startswith('2 '))) + 1
+        crit = dict(list(crit.items())[:i] + [('2b unseen-site pixel IoU at each model\'s val-calibrated threshold (20 m grid) drops by <= 0.01',
+                                              (d_cal, bool(d_cal >= -0.01)))] + list(crit.items())[i:])
     return all(v[1] for v in crit.values()), {k: dict(value=(float(v[0]) if not isinstance(v[0], bool) else v[0]), ok=v[1]) for k, v in crit.items()}
 
 # ------------------------------------------------------------------------------------------ sanity gate
@@ -770,3 +813,58 @@ def sanity_gate(XP, gate_idx, assign, canvas, can_src, edge, pmeta, tm, Xft, met
 
 def X_sorted(X, idx, nch=None):
     j = np.sort(np.asarray(idx)); return X[j, :nch] if nch else X[j]
+
+
+# ------------------------------------------------------------------------------- round 2: sampling weights
+def swir_albedo(X, idx, c0=4, step=8):
+    """Mean target B11/B12 reflectance per chip on a coarse grid (every step-th pixel): a cheap surface-brightness
+    proxy. Pair caches: c0 = 4 (channels 4, 5); the 31-channel fine-tune cache: c0 = 5. Reads only those two channels."""
+    idx = np.asarray(idx); out = np.empty(len(idx), np.float32)
+    for n, k in enumerate(idx):
+        out[n] = np.nanmean(np.asarray(X[int(k), c0:c0 + 2, ::step, ::step], dtype=np.float32))
+    return out
+
+def unseen_like_weights(sites, countries, albedo, train_sites, *, novel_boost=2.0, a_site=0.5, a_country=0.5, a_albedo=0.5,
+                        n_bins=10, w_cap=20.0, mix=0.5):
+    """Sampling weights for plume-free training pairs that push the synthetic half toward conditions the fine-tune train
+    split covers least. Uses only training-split information: no test or val statistics.
+      * novel site (no fine-tune train chip at that site name) x novel_boost;
+      * site balance  count(site)^-a_site      (big, often revisited sites stop dominating);
+      * region balance count(country)^-a_country;
+      * surface balance count(albedo bin)^-a_albedo (n_bins equal-width SWIR-brightness bins between the pool's p1 and p99).
+    Weights are normalised to mean 1, capped at w_cap, then mixed with uniform: mix * w + (1 - mix), so at least
+    (1 - mix) of the draws stay uniform over the pool. Returns (weights, report)."""
+    sites = pd.Series(np.asarray(sites)); countries = pd.Series(np.asarray(countries)).fillna('unknown')
+    albedo = np.asarray(albedo, np.float64); ok = np.isfinite(albedo)
+    lo, hi = np.nanquantile(albedo[ok], [0.01, 0.99]) if ok.any() else (0.0, 1.0)
+    edges = np.linspace(lo, hi, n_bins + 1)[1:-1]          # equal-width bins: rare (very dark / bright) surfaces get more weight
+    abin = np.where(ok, np.searchsorted(edges, np.where(ok, albedo, 0)), n_bins)
+    novel = ~sites.isin(set(train_sites)).values
+    cnt = lambda s: s.map(s.value_counts()).values.astype(np.float64)
+    w = (np.where(novel, novel_boost, 1.0) * cnt(sites) ** -a_site * cnt(countries) ** -a_country
+         * cnt(pd.Series(abin)) ** -a_albedo)
+    w = w / w.mean(); w = np.minimum(w, w_cap); w = w / w.mean(); w = mix * w + (1 - mix)
+    rep = pool_report(sites, countries, albedo, novel, None) | {'weighted': pool_report(sites, countries, albedo, novel, w)}
+    rep['effective_sample_size'] = float(w.sum() ** 2 / (w ** 2).sum()); rep['n'] = int(len(w))
+    rep['settings'] = dict(novel_boost=novel_boost, a_site=a_site, a_country=a_country, a_albedo=a_albedo, n_bins=n_bins, w_cap=w_cap, mix=mix)
+    return w, rep
+
+def pool_report(sites, countries, albedo, novel, w=None, top=8):
+    """Share of draws by country (top), novel-site share, distinct sites, albedo quartiles; weighted if w is given."""
+    w = np.ones(len(sites)) if w is None else np.asarray(w, np.float64); w = w / w.sum()
+    c = pd.Series(w).groupby(pd.Series(np.asarray(countries)).fillna('unknown').values).sum().sort_values(ascending=False)
+    a = np.asarray(albedo, np.float64); ok = np.isfinite(a); o = np.argsort(a[ok]); cw = np.cumsum(w[ok][o]) / max(w[ok].sum(), 1e-12)
+    aq = [float(a[ok][o][min(np.searchsorted(cw, p), ok.sum() - 1)]) for p in (0.25, 0.5, 0.75)] if ok.any() else [float('nan')] * 3
+    return dict(country_share={k: round(float(v), 4) for k, v in c.head(top).items()}, novel_site_share=float(w[np.asarray(novel, bool)].sum()),
+                n_sites=int(pd.Series(np.asarray(sites)).nunique()), albedo_q25_q50_q75=aq)
+
+def hard_negatives(scores, top_frac=0.10):
+    """Hard plume-free training pairs: the top_frac highest scene scores of the init model (fr_neg)."""
+    scores = np.asarray(scores, np.float64); t = np.quantile(scores, 1 - top_frac)
+    return scores >= t, float(t)
+
+def boost_share(w, flag, share):
+    """Scale the weights of flagged entries so they make up `share` of the weighted draws."""
+    w = np.asarray(w, np.float64).copy(); f = np.asarray(flag, bool); Wf, Wn = w[f].sum(), w[~f].sum()
+    if Wf > 0 and Wn > 0 and 0 < share < 1: w[f] *= share * Wn / ((1 - share) * Wf)
+    return w / w.mean()
