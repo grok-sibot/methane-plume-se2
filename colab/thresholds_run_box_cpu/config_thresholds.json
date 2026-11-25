@@ -1,0 +1,27 @@
+{
+ "threshold": 0.5,
+ "readout": "p = sigmoid(plume_logits); pp = avg_pool2d(p, 2) (20 m); scene_score = max(pp); plume_present = scene_score >= scene_threshold; mask = (pp >= mask_threshold) if plume_present else empty",
+ "scene_threshold": 0.9965826869010925,
+ "mask_threshold": 0.6,
+ "mask_grid": "20m (2x2 mean-pooled probabilities)",
+ "min_mask_pixels_20m": 10,
+ "operating_points": {
+  "10%": {
+   "scene_threshold": 0.99436354637146,
+   "val_false_alarm_target": 0.1,
+   "test_real2024_strict_false_alarm": 0.0683066361556064
+  },
+  "5%": {
+   "scene_threshold": 0.9965826869010925,
+   "val_false_alarm_target": 0.05,
+   "test_real2024_strict_false_alarm": 0.028832951945080093
+  },
+  "1%": {
+   "scene_threshold": 0.9983726143836975,
+   "val_false_alarm_target": 0.01,
+   "test_real2024_strict_false_alarm": 0.004233409610983982
+  }
+ },
+ "recommended_operating_point": "5%",
+ "note": "threshold (0.5) is the legacy single pixel threshold. Scene thresholds were chosen on 2021 val plume-free pairs only; they are for scene_score (max of pooled probabilities), not for single pixels."
+}
