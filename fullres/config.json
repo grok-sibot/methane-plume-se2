@@ -22,5 +22,29 @@
  "threshold": 0.5,
  "min_chip_pixels": 40,
  "encoder": "mobilenet_v2",
- "model": "fr_neg"
+ "model": "fr_neg",
+ "scene_threshold": 0.9965826869,
+ "mask_threshold": 0.6,
+ "mask_grid": "20m",
+ "min_mask_pixels_20m": 10,
+ "operating_points": {
+  "10%": {
+   "scene_threshold": 0.9943635464,
+   "val_false_alarm_target": 0.1,
+   "test_real2024_strict_false_alarm": 0.0683
+  },
+  "5%": {
+   "scene_threshold": 0.9965826869,
+   "val_false_alarm_target": 0.05,
+   "test_real2024_strict_false_alarm": 0.0288,
+   "default": true
+  },
+  "1%": {
+   "scene_threshold": 0.9983726144,
+   "val_false_alarm_target": 0.01,
+   "test_real2024_strict_false_alarm": 0.0042
+  }
+ },
+ "readout": "p = sigmoid(plume_logits); pp = 2x2 mean pool of p (20 m grid); scene_score = max(pp); plume_present = scene_score >= scene_threshold; mask = (pp >= mask_threshold) if plume_present else empty; report the chip if the mask has >= min_mask_pixels_20m pixels",
+ "threshold_note": "threshold (0.5) is the legacy single 10 m pixel threshold, kept for older tools. scene_threshold applies to scene_score only, never to single pixels. Thresholds were chosen on 2021 val data only."
 }

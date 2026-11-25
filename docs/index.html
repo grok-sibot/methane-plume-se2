@@ -152,6 +152,24 @@
   </div>
   <p class="fine" style="margin-bottom:56px">Expect new-site performance nearer the unseen rows. The lower unseen false-alarm rate reflects a different scene mix, not better generalisation. 251 chips is a small sample. Source: <code>test_seen_unseen.csv</code>.</p>
 
+  <h3 class="minor">Fewer false alarms: a scene gate.</h3>
+  <p class="fine">At 0.5 the model flags 36&nbsp;% of real plume-free 2024 scenes. Reading the same output in two stages fixes most of that. First the scene is flagged when its highest 20&nbsp;m probability clears a threshold set on 2021 validation scenes. Then the mask is drawn at 0.6. The model file is unchanged.</p>
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Operating thresholds">
+  <table>
+    <thead>
+      <tr><th scope="col">Operating point</th><th scope="col">False alarms (2024 plume-free scenes)</th><th scope="col">Plumes caught, all</th><th scope="col">Plumes caught, unseen sites</th><th scope="col">Mask IoU when flagged</th></tr>
+    </thead>
+    <tbody>
+      <tr><th scope="row">0.5 everywhere</th><td>35.6&nbsp;%</td><td>0.840</td><td>0.737</td><td>0.546</td></tr>
+      <tr><th scope="row">High recall</th><td>6.8&nbsp;%</td><td>0.556</td><td>0.454</td><td>0.601</td></tr>
+      <tr class="hl"><th scope="row">Default</th><td>2.9&nbsp;%</td><td>0.389</td><td>0.315</td><td>0.622</td></tr>
+      <tr><th scope="row">Strict</th><td>0.4&nbsp;%</td><td>0.123</td><td>0.092</td><td>0.592</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="fine">Thresholds were picked on 2021 validation data only, and every number above is from the 2024 test split. Fewer false alarms means fewer plumes caught. At the default, about 2 in 5 test plumes are caught, and about 1 in 3 at sites never seen in training (95&nbsp;% interval 0.23–0.41). Source: <code>colab/thresholds_run_box_cpu/thresholds.json</code>.</p>
+  <p class="fine" style="margin-bottom:56px">Thresholds and read-out are in the model's <code>config.json</code> and <code>infer.py</code>.</p>
+
   <div class="speed">
     <div><span class="num">~31&nbsp;ms</span><span class="lbl">ONNX Runtime, x86 CPU, 1 thread</span></div>
     <div><span class="num">~11&nbsp;ms</span><span class="lbl">PyTorch FP16, Tesla T4</span></div>
@@ -181,7 +199,7 @@
     <li><strong>The selection rule changed after test numbers were seen.</strong> Release selection moved from validation IoU to validation false-alarm rate, which favours <code>fr_neg</code>. Its test numbers are therefore not a clean held-out estimate.</li>
     <li><strong>Non-commercial.</strong> Training data is MethaneSET under CC&nbsp;BY-NC-SA&nbsp;4.0, so the weights are too.</li>
   </ul>
-  <p class="note">Released: <code>fr_neg</code> at threshold 0.5 on the full-resolution Hugging Face card. It replaces two earlier releases, <code>fr_ft_s0</code> at 0.7 and then <code>fr_base</code> at 0.7, both picked by validation IoU.</p>
+  <p class="note">Released: <code>fr_neg</code> on the full-resolution Hugging Face card, with a scene gate (0.99658, set on validation data) and a 0.6 mask threshold as the default read-out; 0.5 stays available. It replaces two earlier releases, <code>fr_ft_s0</code> at 0.7 and then <code>fr_base</code> at 0.7, both picked by validation IoU.</p>
 </section>
 
 <section id="links" class="block reveal">

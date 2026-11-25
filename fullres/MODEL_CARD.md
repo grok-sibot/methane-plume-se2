@@ -19,14 +19,16 @@ JetPack 6.2, TensorRT 10.3, 10–25 W).
 Spiral Blue.** It has not been run on Jetson hardware.
 
 **Released weights: `fr_neg` at threshold 0.5** (fine-tuned with plume-free pairs, chosen for the lowest val false-alarm rate).
+**For alerting, use the two-stage operating thresholds** (scene gate at 0.99658, mask at 0.6): real 2024 false alarms fall from 35.6 % to 2.9 %.
+The cost is detection: the share of test plumes caught falls from 0.840 to 0.389, and from 0.737 to 0.315 at unseen sites. See "Operating thresholds".
 The section below explains the change from the two earlier releases (`fr_ft_s0` at 0.7, then `fr_base` at 0.7).
 
 ## Input contract
 
 - `reflectance`: float32 `1×8×200×200`, L1C TOA reflectance (DN / 10000) at 10 m (2 km × 2 km). Channels: target B2, B3, B4, B8A,
   B11, B12, then reference B11, B12. The 20 m bands are used as MethaneSET provides them, resampled to 10 m.
-- `plume_logits`: float32 `1×1×200×200`. Apply a sigmoid, then threshold at **0.5** (in `config.json`). A chip
-  counts as flagged at ≥40 pixels (0.4 ha).
+- `plume_logits`: float32 `1×1×200×200`. Apply a sigmoid. **Recommended:** the two-stage read-out in "Operating thresholds"
+  (scene gate, then a 20 m mask at 0.6). **Legacy:** threshold at 0.5 (`threshold` in `config.json`), and a chip counts as flagged at ≥40 pixels (0.4 ha).
 - A SWIR ratio channel `log(B12/B11)_target − log(B12/B11)_reference` (mean-centred) is computed inside the graph in fp32.
   The input is reflect-padded to 224 inside the graph and cropped back to 200.
 - The channels and scaling are the same as the 20 m model. Only the spatial size differs. The ONNX file name and tensor names have not changed.
@@ -204,6 +206,52 @@ Released weights, test split, threshold 0.5 (measured; det/FA use ≥0.4 ha):
 - Per-row numbers: `test_seen_unseen.csv`. Script: `src/score_seen_unseen.py` in the
   [GitHub repo](https://github.com/grok-sibot/methane-plume-se2).
 
+## Operating thresholds (recommended for onboard alerting)
+
+At the single threshold 0.5 the model flags **35.6 %** of real plume-free 2024 scenes (8,740 pairs at sites in no training split).
+That is too many for downlink alerting. The same network output can be read in two stages instead. The ONNX file and its
+input/output are unchanged.
+
+```
+p  = sigmoid(plume_logits)          # 1x1x200x200
+pp = avg_pool2d(p, 2)               # 20 m grid, 100x100
+scene_score = pp.max()
+plume_present = scene_score >= T_scene
+mask = (pp >= 0.6) if plume_present else empty     # >= 10 pixels (0.4 ha) to report
+```
+
+`T_scene` is set on **2021 val** plume-free pairs (2,000) to give 10, 5 or 1 % false alarms there. The mask threshold 0.6 is
+the best val pixel IoU, but val IoU is flat between 0.5 and 0.65 (0.497 to 0.498), so 0.5 works as well. No test data was used
+to choose either. A scene threshold must not be used as a pixel threshold: at 0.9966 the masks shrink to IoU 0.03.
+
+Test 2024, released `model.safetensors`, fp32. Brackets are 95 % intervals from resampling sites.
+
+| operating point | T_scene | real false alarms, 2024 plume-free scenes | scene hit rate, all plumes (1,050) | seen sites (799) | **unseen sites (251)** | mask IoU, end to end (all / unseen) | mask IoU, flagged scenes only (all / unseen) |
+|---|---|---|---|---|---|---|---|
+| 0.5 everywhere (previous) | 0.5 | 35.6 % [33.5–37.9] | 0.840 | 0.872 | 0.737 [0.644–0.833] | 0.521 / 0.435 | 0.546 / 0.482 |
+| val 10 % (high recall) | 0.99436 | 6.8 % [6.0–7.8] | 0.556 | 0.588 | 0.454 [0.351–0.561] | 0.410 / 0.334 | 0.601 / 0.580 |
+| **val 5 % (default)** | **0.99658** | **2.9 % [2.4–3.5]** | **0.389** | **0.412** | **0.315 [0.228–0.406]** | **0.296 / 0.222** | **0.622 / 0.576** |
+| val 1 % (strict) | 0.99837 | 0.42 % [0.28–0.59] | 0.123 | 0.133 | 0.092 [0.050–0.145] | 0.093 / 0.077 | 0.592 / 0.585 |
+
+- **Hit:** at least one flagged 20 m pixel lies inside the analyst plume mask. *End-to-end IoU* counts every plume in a scene
+  that is not flagged as missed. *Flagged-only IoU* is the mask quality once a scene is flagged.
+- **The trade-off is steep.** Cutting false alarms from 36 % to about 3 % keeps roughly 2 in 5 test plumes, and about 1 in 3 at
+  sites never seen in training.
+- **Val false alarms did not carry over exactly.** Targets of 10/5/1 % on 2021 val gave 6.8/2.9/0.42 % on 2024. The val pairs come
+  from sites that may be in training, while the test pairs come from sites in no training split. The thresholds are
+  conservative here, but they could go the other way on new data.
+- **Same-site plume-free pairs** (bg1 vs bg0 of the test chips, ≥ 0.4 ha flagged, the card's older FA metric):
+  0.550 at 0.5, then 0.227, 0.131 and 0.024.
+- **Limits:** the split is by year, not by site (76 % of test plumes are at seen sites). There are only 193 val plumes, and the 1 %
+  threshold rests on about 20 val plume-free pairs. The intervals cover test sampling only, not the val choice. The chips are
+  centred on known emitters. FP16/INT8 engines must reproduce `scene_score` to about 1e-4 near 0.997, so check them against the ONNX.
+- **Input precision:** the thresholds were calibrated on reflectance stored as float16, as in the evaluation caches. On one test chip,
+  full-precision float32 input moved the scene score by +2e-4 (0.99690 to 0.99710), so treat scenes within about 3e-4 of `T_scene` as borderline.
+- `infer.py` uses this read-out by default (`--scene-thr`, `--no-gate`; see its header). `config.json` holds the thresholds:
+  `scene_threshold` (val 5 %, the default), `mask_threshold`, `mask_grid`, `min_mask_pixels_20m` and `operating_points`. `threshold` stays 0.5 for older tools.
+- Notebook: [`colab/fr_neg_thresholds_colab.ipynb`](https://colab.research.google.com/github/grok-sibot/methane-plume-se2/blob/main/colab/fr_neg_thresholds_colab.ipynb).
+  Results: [`colab/thresholds_run_box_cpu/`](https://github.com/grok-sibot/methane-plume-se2/tree/main/colab/thresholds_run_box_cpu) (`thresholds.json`, chosen on val before any test chip was scored, and reproducing the round-2 `fr_neg` numbers).
+
 ## Size and speed (released weights)
 
 - 4,133,819 parameters; 1.10 GMACs per 200×200 chip (fvcore); ONNX 16.5 MB (opset 17, static).
@@ -213,7 +261,7 @@ Released weights, test split, threshold 0.5 (measured; det/FA use ≥0.4 ha):
 
 ## Files
 
-`model.safetensors` and `methane_se2_fullres_unet_mobilenet_v2.onnx` (fr_neg), `config.json` (input contract and threshold 0.5), `infer.py` (default threshold 0.5),
+`model.safetensors` and `methane_se2_fullres_unet_mobilenet_v2.onnx` (fr_neg), `config.json` (input contract, operating thresholds, legacy threshold 0.5), `infer.py` (two-stage read-out by default; `--no-gate --grid 10m --thr 0.5` is the old behaviour),
 `build_trt.sh` (untested on Jetson), `calibration_train256.npy` (INT8 calibration inputs from the train split, float16; they do not depend on the model),
 `results.json` (full threshold sweeps for every model, plus the `selection` record), `comparison_test.csv`, `training_history/`, `training_curves.png`,
 `threshold_sweep_val.png` (first run), `example_predictions.png` (fr_neg at 0.5), and `src/methane_fullres.py`.
